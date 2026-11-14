@@ -1,0 +1,10 @@
+{
+  "name": "qqbot-fatfish",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.14 <25" },
+  "scripts": {
+    "start": "bash scripts/start.sh",
+    "test": "node --test tests/*.test.mjs"
+  }
+}

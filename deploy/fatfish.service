@@ -1,0 +1,31 @@
+[Unit]
+Description=QQ Fatfish companion bot
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=fatfish
+Group=fatfish
+WorkingDirectory=/opt/fatfish/current
+Environment=NODE_ENV=production NODE_USE_ENV_PROXY=0 HOST=127.0.0.1 PORT=3210 DATA_DIR=/var/lib/fatfish
+ExecStartPre=/usr/bin/rm -f /var/lib/fatfish/app.lock
+ExecStart=/opt/fatfish/runtime/bin/node --env-file=/etc/fatfish/fatfish.env src/main.mjs
+Restart=always
+RestartSec=5
+TimeoutStopSec=70
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fatfish
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+MemoryMax=512M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

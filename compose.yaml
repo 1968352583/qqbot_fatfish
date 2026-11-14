@@ -1,0 +1,22 @@
+services:
+  fatfish:
+    build: .
+    restart: unless-stopped
+    init: true
+    env_file: .env.local
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3210"
+      DATA_DIR: /data
+    ports:
+      - "127.0.0.1:3210:3210"
+    volumes:
+      - fatfish-data:/data
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  fatfish-data:
