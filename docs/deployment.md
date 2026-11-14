@@ -2,6 +2,8 @@
 
 本项目使用 GitHub 托管运行器执行测试，通过受限 SSH 入口发布到 Linux 服务器，由 systemd 持续运行。机器人使用独立的 `fatfish` 账号，开机启动，异常退出后自动重启；主程序与私人数据分别存放。实际上线结果见 [验证记录](validation/app.md)。
 
+2026-11-14 当前状态：云端实例已经通过受限发布入口上线，QQ 连接及异常重启验证通过；GitHub 测试通过，但运行器到服务器的连接超时，自动发布仍待网络问题解决。以下流程已配置，尚未完成端到端自动发布验收。
+
 ## 日常发布
 
 提交并推送至 `main` 后，GitHub Actions 的 [Test and deploy](https://github.com/1968352583/qqbot_fatfish/actions/workflows/ci-deploy.yml) 自动执行：
