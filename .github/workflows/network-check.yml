@@ -1,5 +1,11 @@
 name: Check deployment network
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      expected_target_sha256:
+        description: Optional SHA-256 of the expected deployment host
+        required: false
+        type: string
 permissions: {}
 jobs:
   network:
@@ -10,11 +16,58 @@ jobs:
       - name: Check server connection paths without changing them
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          EXPECTED_TARGET_SHA256: ${{ inputs.expected_target_sha256 }}
         run: |
-          for port in 22 80 443 888 8888; do
-            if timeout 8 bash -c 'exec 3<>/dev/tcp/"$DEPLOY_HOST"/"$1"' _ "$port" 2>/dev/null; then
-              echo "Port $port is reachable"
-            else
-              echo "Port $port is not reachable"
-            fi
-          done
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, os, socket
+          host = os.environ['DEPLOY_HOST']
+          expected = os.environ.get('EXPECTED_TARGET_SHA256', '')
+          print('Target contains surrounding whitespace:', host != host.strip())
+          if expected:
+              matches = hashlib.sha256(host.encode()).hexdigest() == expected
+              print('Deployment target matches expected server:', matches, flush=True)
+              if not matches:
+                  raise SystemExit(2)
+          socket.inet_aton(host)
+          print('Target is a literal IPv4 address; DNS is not used.')
+          print('Proxy environment variable names:', sorted(k for k in os.environ if k.lower().endswith('_proxy')))
+          PY
+          ip -4 route get "$DEPLOY_HOST"
+          echo 'Runner public IPv4:'
+          curl -4 --noproxy '*' --connect-timeout 5 --max-time 8 --silent --show-error https://api.ipify.org || true
+          echo
+          capture_file=$(mktemp)
+          sudo timeout 45 tcpdump -l -nn -tttt -S -i any \
+            "host $DEPLOY_HOST and tcp and (tcp[tcpflags] & (tcp-syn|tcp-rst) != 0)" \
+            > "$capture_file" 2>&1 &
+          capture_pid=$!
+          trap 'sudo kill -INT "$capture_pid" 2>/dev/null || true; rm -f "$capture_file"' EXIT
+          sleep 1
+          result=0
+          python3 - <<'PY' || result=$?
+          import json, os, socket, time
+          from concurrent.futures import ThreadPoolExecutor
+          host = os.environ['DEPLOY_HOST']
+          required = {22, 80, 8888}
+          def probe(port):
+              started = time.monotonic()
+              try:
+                  with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                      sock.settimeout(8)
+                      sock.bind(('0.0.0.0', 44000 + port))
+                      sock.connect((host, port))
+                      return {'port': port, 'connected': True, 'seconds': round(time.monotonic() - started, 3)}
+              except OSError as error:
+                  return {'port': port, 'connected': False, 'error': str(error), 'seconds': round(time.monotonic() - started, 3)}
+          with ThreadPoolExecutor(max_workers=5) as pool:
+              results = list(pool.map(probe, [22, 80, 443, 888, 8888]))
+          for item in results:
+              print(json.dumps(item), flush=True)
+          raise SystemExit(1 if any(not item['connected'] for item in results if item['port'] in required) else 0)
+          PY
+          sudo kill -INT "$capture_pid" 2>/dev/null || true
+          wait "$capture_pid" || true
+          echo 'Handshake headers only (no application payload):'
+          cat "$capture_file"
+          exit "$result"
