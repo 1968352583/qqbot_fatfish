@@ -2,13 +2,15 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import { BailianVoice } from './bailian.mjs';
 
 export class Voice {
-  constructor({ store, secrets, fetchImpl = fetch }) { Object.assign(this, { store, secrets, fetch: fetchImpl }); }
-  async synthesize(text, { signal, optional = false } = {}) {
+  constructor({ store, secrets, fetchImpl = fetch }) { Object.assign(this, { store, secrets, fetch: fetchImpl }); this.bailian = new BailianVoice({ store, secrets, fetchImpl }); }
+  async synthesize(text, { signal, optional = false, instruction = '' } = {}) {
     const config = this.store.config();
     if (config.voiceProvider === 'disabled') throw new Error('语音未启用。');
     if (text.length > 100) throw new Error('本次内容更适合文字。');
+    if (config.voiceProvider === 'bailian') return this.bailian.synthesize(text, { signal, optional, instruction });
     if (config.voiceProvider === 'system') {
       if (process.platform !== 'darwin') throw new Error('当前系统需要配置云端语音。');
       const dir = await mkdtemp(join(tmpdir(), 'fatfish-voice-'));

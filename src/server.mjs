@@ -3,13 +3,14 @@ import { readFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 
-export function createAdminServer({ store, secrets, bot, runtime, publicDir, publicOrigin }) {
+export function createAdminServer({ store, secrets, bot, voice, runtime, publicDir, publicOrigin }) {
   const sessions = new Map(), attempts = new Map();
+  let voiceBusy = false;
   const safeUsers = () => store.users().map(({ openid, ...user }) => user);
   const fail = (message, status = 400) => Object.assign(new Error(message), { status });
   return createServer(async (req, res) => {
     const headers = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store',
-      'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" };
+      'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" };
     const json = (status, value, extra = {}) => { res.writeHead(status, { ...headers, 'Content-Type': 'application/json; charset=utf-8', ...extra }); res.end(JSON.stringify(value)); };
     try {
       const localHosts = [`127.0.0.1:${res.socket.localPort}`, `localhost:${res.socket.localPort}`];
@@ -47,6 +48,16 @@ export function createAdminServer({ store, secrets, bot, runtime, publicDir, pub
         if (url.pathname === '/api/state' && req.method === 'GET') { json(200, { config: store.config(), users: safeUsers(), usage: store.usage(), secrets: secrets.status(), reminders: store.reminders(), runtime }); return; }
         if (url.pathname === '/api/config' && req.method === 'PUT') { const config = store.updateConfig(body); bot.stop(); store.prune(); json(200, config); return; }
         if (url.pathname === '/api/secrets' && req.method === 'PUT') { const status = secrets.update(body); if (body.adminPassword) sessions.clear(); json(200, status); return; }
+        if (['/api/voice/preview', '/api/voice/design'].includes(url.pathname) && req.method === 'POST') {
+          if (!voice?.bailian) throw fail('百炼语音尚未接入。', 503);
+          if (voiceBusy) throw fail('上一段语音仍在生成，请稍等。', 409);
+          voiceBusy = true;
+          try {
+            const result = url.pathname.endsWith('/design') ? await voice.bailian.design({ prompt: body.prompt, text: body.text }) : await voice.bailian.synthesize(body.text, { instruction: body.instruction, manual: true });
+            json(200, { audio: result.bytes.toString('base64'), mime: 'audio/wav', ...(result.voiceId ? { voiceId: result.voiceId, model: result.model } : {}) });
+          } finally { voiceBusy = false; }
+          return;
+        }
         if (url.pathname === '/api/invites' && req.method === 'POST') { json(200, { code: store.invite(), expiresHours: 24 }); return; }
         const match = url.pathname.match(/^\/api\/users\/([a-f0-9-]+)(?:\/(messages|memories|reminders)(?:\/([a-f0-9-]+))?)?$/);
         if (match) {

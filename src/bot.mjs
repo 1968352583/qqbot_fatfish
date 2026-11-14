@@ -116,7 +116,7 @@ export class Bot {
     const onFirst = () => { if (proactive && !initiated) { this.store.initiated(userId); initiated = true; } };
     if ((explicit || automatic) && this.voice && text.length <= 100) {
       try {
-        const audio = await this.voice.synthesize(text, { signal: input.signal, optional: !explicit });
+        const audio = await this.voice.synthesize(text, { signal: input.signal, optional: !explicit, instruction: response.voiceInstruction });
         if (!this.current(userId, input) || !this.store.preferences(userId).enabled) return;
         if (!proactive && this.store.now() - input.at > 4 * 60000) return;
         const reply = proactive ? undefined : { id: input.id, seq: this.store.replySequence(input.id) };

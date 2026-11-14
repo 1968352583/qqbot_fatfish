@@ -72,9 +72,11 @@ bash deploy/install.sh /path/to/node-v24.14.1-linux-x64.tar.xz /path/to/github-d
 
 ## 语音与资源
 
-当前服务器为 2 核、约 2 GB 内存、无 NVIDIA GPU。机器人本体调用远端 DeepSeek；语音输入与图片理解延续现有通道，macOS Tingting 输出无法在 Linux 使用。本次迁移把语音提供方设为禁用并关闭全局自动语音，语音输出请求回退文字。
+当前服务器为 2 核、约 2 GB 内存、无 NVIDIA GPU。机器人本体调用远端 DeepSeek；语音输入与图片理解延续现有通道，macOS Tingting 输出无法在 Linux 使用。迁移初期禁用了语音输出，后续新增百炼 Qwen-Audio-3.1-TTS-Plus 适配，服务器已验证合成和 WAV 下载，可通过管理员后台选择百炼并配置声音。
 
-用户指定的 Breeze TTS 2 本地权重约 7.124 GiB，官方建议至少 12 GB 显存；当前服务器无法按现有实现正常运行。具体依据和协议差异见 [Breeze 适配检查](research/breeze-server-fit.md)。后续可接独立语音 API 或另有足够资源的 Breeze 推理服务。
+用户指定的 Breeze TTS 2 本地权重约 7.124 GiB，官方建议至少 12 GB 显存；当前服务器无法按现有实现正常运行。具体依据和协议差异见 [Breeze 适配检查](research/breeze-server-fit.md)。百炼由远端执行推理，不安装本地模型。
+
+百炼使用北京地域业务空间专属 HTTPS 域名。API Key 通过 `DASHSCOPE_API_KEY` 环境变量或后台凭据提供，业务空间和音色在持久设置中保存；后台凭据优先于环境变量。合成结果仅从允许的阿里云 OSS 域名下载，使用 HTTPS，不将 API Key 转发到文件存储，不跟随重定向。管理员试听与音色设计要求登录及同源请求。
 
 仓库中的 Dockerfile/compose.yaml 保留作可选模板，本次正式部署使用 systemd，没有依赖服务器拉取 Docker 镜像。
 

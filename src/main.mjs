@@ -45,7 +45,7 @@ const bot = new Bot({ store, model, voice, transport: api, log });
 const controller = new AbortController();
 const pending = new Set();
 const track = promise => { pending.add(promise); promise.catch(() => log('runtime', '操作未完成。')).finally(() => pending.delete(promise)); };
-const server = createAdminServer({ store, secrets, bot, runtime, publicDir: resolve(root, 'public'), publicOrigin: process.env.ADMIN_ORIGIN });
+const server = createAdminServer({ store, secrets, bot, voice, runtime, publicDir: resolve(root, 'public'), publicOrigin: process.env.ADMIN_ORIGIN });
 const port = Number(process.env.PORT ?? 3210), host = process.env.HOST ?? '127.0.0.1';
 await new Promise((done, reject) => { server.once('error', reject); server.listen(port, host, done); });
 console.log(`大肥鱼管理员入口：http://${host}:${port}`);
