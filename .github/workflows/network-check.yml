@@ -1,0 +1,20 @@
+name: Check deployment network
+on: workflow_dispatch
+permissions: {}
+jobs:
+  network:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    environment: production
+    steps:
+      - name: Check server connection paths without changing them
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          for port in 22 80 443; do
+            if timeout 8 bash -c 'exec 3<>/dev/tcp/"$DEPLOY_HOST"/"$1"' _ "$port" 2>/dev/null; then
+              echo "Port $port is reachable"
+            else
+              echo "Port $port is not reachable"
+            fi
+          done
