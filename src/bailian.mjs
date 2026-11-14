@@ -19,8 +19,30 @@ async function readBounded(response, limit) {
 }
 
 function wav(bytes) {
-  if (bytes.length < 1000 || bytes.length > MAX_AUDIO || bytes.toString('ascii', 0, 4) !== 'RIFF' || bytes.toString('ascii', 8, 12) !== 'WAVE') throw new Error('百炼没有返回有效的 WAV 音频。');
-  return { bytes, filename: 'voice.wav' };
+  const invalid = () => new Error('百炼没有返回有效的 24 kHz 单声道 WAV 音频。');
+  if (bytes.length < 1000 || bytes.length > MAX_AUDIO || bytes.toString('ascii', 0, 4) !== 'RIFF' || bytes.toString('ascii', 8, 12) !== 'WAVE') throw invalid();
+  const normalized = Buffer.from(bytes); let offset = 12, format = false, data = false;
+  while (offset < bytes.length) {
+    if (offset + 8 > bytes.length) throw invalid();
+    const tag = bytes.toString('ascii', offset, offset + 4), available = bytes.length - offset - 8;
+    let size = bytes.readUInt32LE(offset + 4);
+    if (tag === 'data' && size > available) {
+      // Bailian may leave streaming-size placeholders in a completed WAV.
+      // Fix lengths from the bounded downloaded bytes, without touching PCM.
+      if (size < 0x7fff0000) throw invalid();
+      size = available; normalized.writeUInt32LE(size, offset + 4);
+    }
+    if (size > available) throw invalid();
+    if (tag === 'fmt ') {
+      if (format || size < 16 || bytes.readUInt16LE(offset + 8) !== 1 || bytes.readUInt16LE(offset + 10) !== 1 || bytes.readUInt32LE(offset + 12) !== 24000 || bytes.readUInt32LE(offset + 16) !== 48000 || bytes.readUInt16LE(offset + 20) !== 2 || bytes.readUInt16LE(offset + 22) !== 16) throw invalid();
+      format = true;
+    }
+    if (tag === 'data') { if (!format || data || size < 2 || size % 2) throw invalid(); data = true; }
+    offset += 8 + size + (size % 2);
+  }
+  if (!format || !data || offset !== bytes.length) throw invalid();
+  normalized.writeUInt32LE(normalized.length - 8, 4);
+  return { bytes: normalized, filename: 'voice.wav' };
 }
 
 export function bailianAudioUrl(value) {

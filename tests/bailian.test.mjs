@@ -35,6 +35,20 @@ test('百炼语音使用专属域名与表达参数，下载不携带密钥，�
   } finally { store.close(); }
 });
 
+test('百炼真实响应的流式占位时长修正为实际长度，PCM 内容保持原样', async () => {
+  const streamed = Buffer.from(audio); streamed.writeUInt32LE(0x7fffffbf, 4); streamed.writeUInt32LE(0x7fffff9b, 40);
+  const { store, voice } = setup(async (_url, options) => {
+    if (JSON.parse(options.body ?? '{}').model === 'voice-enrollment') return Response.json({ output: { voice_id: `${BAILIAN_MODEL}-vd-fatfish-fixture`, target_model: BAILIAN_MODEL, preview_audio: { data: streamed.toString('base64') } } });
+    return options.method === 'POST' ? output() : new Response(streamed);
+  });
+  try {
+    const synthesized = await voice.synthesize('你好呀');
+    const designed = await voice.bailian.design({ prompt: '清亮自然的声音', text: '你回来啦，今天有什么好玩的，快讲给我听。' });
+    for (const result of [synthesized, designed]) assert.deepEqual(result.bytes, audio);
+    assert.equal(streamed.readUInt32LE(40), 0x7fffff9b);
+  } finally { store.close(); }
+});
+
 test('关闭自动情绪后忽略模型语气，管理员单句试听仍能指定语气', async () => {
   const instructions = [], { store, voice } = setup(async (_url, options) => { if (options.method === 'POST') { instructions.push(JSON.parse(options.body).input.instruction); return output(); } return new Response(audio); });
   try {
