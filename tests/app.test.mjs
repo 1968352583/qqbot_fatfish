@@ -16,6 +16,28 @@ const packet = (openid, id, content, at = epoch) => ({ op: 0, t: 'C2C_MESSAGE_CR
 const answer = bubbles => ({ bubbles, quotes: [], voice: false, sources: [], memoryIds: [] });
 const immediate = async () => {};
 
+test('invited members can join beyond five while invalid, used and expired invitations stay rejected', async () => {
+  const { store, advance } = setup(); const sent = [];
+  try {
+    for (let i = 3; i <= 5; i++) store.addUser(`existing-${i}`);
+    const bot = new Bot({ store, sleep: immediate, model: { respond: () => { throw new Error('joining must not call AI'); } }, transport: { text: async (openid, text) => sent.push({ openid, text }) } });
+    for (let i = 6; i <= 12; i++) {
+      const code = store.invite(), openid = `invited-${i}`;
+      await bot.accept(packet(openid, `join-${i}`, `/加入 ${code}`));
+      const user = store.byOpenid(openid); assert.ok(user); assert.equal(store.users().length, i);
+      assert.equal(store.addUser(openid).id, user.id); assert.equal(store.users().length, i);
+      assert.equal(store.join(`reuse-${i}`, code), null);
+    }
+    assert.equal(sent.length, 7);
+    await bot.accept(packet('uninvited', 'no-invite', '你好'));
+    await bot.accept(packet('invalid', 'invalid-invite', '/加入 0000000000000000'));
+    const expired = store.invite(); advance(86400001);
+    assert.equal(store.join('expired', expired), null);
+    assert.equal(store.users().length, 12);
+    assert.equal(store.byOpenid('uninvited'), undefined); assert.equal(store.byOpenid('invalid'), undefined);
+  } finally { store.close(); }
+});
+
 function adminLoginFixture(options = {}) {
   const server = createAdminServer({ secrets: { verify: password => password === 'fixture-admin-password' }, publicOrigin: 'https://admin.example.com', ...options });
   const handle = server.listeners('request')[0];

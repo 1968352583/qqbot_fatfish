@@ -42,7 +42,6 @@ export class Store {
   users() { return this.db.prepare('SELECT id FROM users ORDER BY rowid').all().map(row => this.user(row.id)); }
   addUser(openid, name = '新朋友') {
     const existing = this.byOpenid(openid); if (existing) return existing;
-    if (this.users().length >= 5) throw new Error('首期最多五名成员。');
     const id = randomUUID(); this.db.prepare('INSERT INTO users(id,openid,name) VALUES (?,?,?)').run(id, openid, name.slice(0, 50)); return this.user(id);
   }
   updateUser(id, { name, enabled, prefs } = {}) {
