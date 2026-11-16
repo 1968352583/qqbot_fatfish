@@ -35,7 +35,9 @@ ADMIN_ORIGIN=https://8.130.14.159
 ADMIN_TRUST_PROXY=1
 ```
 
-`ADMIN_TRUST_PROXY=1` 用于识别本机 Nginx 转发的 HTTPS 请求，应与回环监听一起使用；不要把应用端口 3210 直接开放到公网。云安全组和系统防火墙需允许入口使用的 80、443 端口。
+`ADMIN_TRUST_PROXY=1` 用于识别本机 Nginx 转发的访客 IP，应与回环监听一起使用；不要把应用端口 3210 直接开放到公网。Nginx 覆盖 `X-Real-IP`，应用仅信任来自回环连接的合法 IP，避免所有公网访客共享一个登录失败计数。云安全组和系统防火墙需允许入口使用的 80、443 端口。
+
+服务器原有的 systemd `nginx.service` 指向另一套系统 Nginx。安装脚本通过 `/etc/systemd/system/nginx.service.d/fatfish-bt.conf` 将它对齐到正在使用的宝塔程序和 PID 文件，启用开机启动及异常重启；首次接管会短暂重启 Nginx。使用 `systemctl status nginx` 查看入口服务状态。
 
 证书为自签叶证书，包含 IP SAN `8.130.14.159`、`CA:FALSE`，有效期 365 天。证书文件为 `/etc/fatfish/tls/cert.pem`，私钥为 `/etc/fatfish/tls/privkey.pem`；私钥权限为 `0600`，仅保存在服务器，不能放入仓库或传给访问设备。浏览器不会自动信任自签证书，这不代表已取得可信 CA 签发的证书。
 

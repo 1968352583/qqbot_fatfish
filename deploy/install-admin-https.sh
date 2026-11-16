@@ -31,23 +31,66 @@ for name in cert.pem privkey.pem; do
 done
 changed=0
 unit_changed=0
+stop_existing_nginx() {
+    local pid
+    [[ -s /www/server/nginx/logs/nginx.pid ]] || return 0
+    read -r pid < /www/server/nginx/logs/nginx.pid
+    [[ $pid =~ ^[0-9]+$ ]] || { echo 'Invalid Nginx PID file.' >&2; return 1; }
+    kill -0 "$pid" 2>/dev/null || return 0
+    [[ $(readlink "/proc/$pid/exe") == "$nginx" ]] || { echo 'Nginx PID belongs to another executable.' >&2; return 1; }
+    kill -QUIT "$pid" || return 1
+    for attempt in $(seq 1 20); do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 1
+    done
+    # QUIT cannot be undone by reload. Finish the shutdown before another master
+    # is started, including when this function is called from failure recovery.
+    [[ $(readlink "/proc/$pid/exe") == "$nginx" ]] || return 0
+    echo 'Nginx graceful shutdown timed out; ending existing connections.' >&2
+    kill -TERM "$pid" || return 1
+    for attempt in $(seq 1 10); do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 1
+    done
+    echo 'Existing Nginx is still running; refusing to start another master.' >&2
+    return 1
+}
+adopt_nginx() {
+    systemctl daemon-reload || return 1
+    if ! systemctl is-active --quiet nginx; then
+        stop_existing_nginx || return 1
+        systemctl reset-failed nginx || return 1
+        systemctl start nginx || return 1
+    fi
+    systemctl enable nginx || return 1
+    systemctl is-active --quiet nginx
+}
 finish() {
     result=$?
     trap - EXIT
     if [[ $result -ne 0 && $changed -eq 1 ]]; then
-        cp -p "$backup/env" "$env_file"
-        if [[ -f $backup/nginx.conf ]]; then cp -p "$backup/nginx.conf" "$nginx_config"; else rm -f "$nginx_config"; fi
+        restored=1
+        cp -p "$backup/env" "$env_file" || restored=0
+        if [[ -f $backup/nginx.conf ]]; then cp -p "$backup/nginx.conf" "$nginx_config" || restored=0; else rm -f "$nginx_config" || restored=0; fi
         for name in cert.pem privkey.pem; do
-            if [[ -f $backup/$name ]]; then cp -p "$backup/$name" "$tls_dir/$name"; else rm -f "$tls_dir/$name"; fi
+            if [[ -f $backup/$name ]]; then cp -p "$backup/$name" "$tls_dir/$name" || restored=0; else rm -f "$tls_dir/$name" || restored=0; fi
         done
-        if [[ $unit_changed -eq 1 ]]; then
-            if [[ -f $backup/nginx-systemd.conf ]]; then cp -p "$backup/nginx-systemd.conf" "$unit_override"; else rm -f "$unit_override"; fi
-            systemctl daemon-reload || true
+        if [[ $restored -eq 1 ]]; then
+            if [[ $unit_changed -eq 1 ]]; then
+                # Keep the corrected BaoTa unit: restoring the broken RPM unit
+                # would leave restart/boot pointing at a different installation.
+                "$nginx" -t && adopt_nginx && systemctl reload nginx && systemctl is-active --quiet nginx || restored=0
+            else
+                "$nginx" -t && "$nginx" -s reload || restored=0
+            fi
+            systemctl restart fatfish || restored=0
         fi
-        "$nginx" -t && "$nginx" -s reload || true
-        if ! test -s /www/server/nginx/logs/nginx.pid; then "$nginx" || true; fi
-        systemctl restart fatfish || true
-        echo "HTTPS installation failed; previous configuration restored. Backup: $backup" >&2
+        if [[ $restored -eq 1 ]]; then
+            echo "HTTPS installation failed; previous application/TLS/site configuration restored. Backup: $backup" >&2
+            [[ $unit_changed -eq 0 ]] || echo 'BaoTa Nginx remains managed and enabled by the corrected systemd unit.' >&2
+        else
+            echo "HTTPS installation failed and automatic recovery is incomplete; inspect Nginx/fatfish before continuing. Backup: $backup" >&2
+        fi
     fi
     exit "$result"
 }
@@ -56,15 +99,34 @@ trap 'exit 130' INT TERM HUP
 changed=1
 
 # Reuse the certificate unless close to expiry. Rotation changes its fingerprint.
+constraints=0
+if [[ -s $tls_dir/cert.pem ]]; then
+    constraints=$(openssl x509 -in "$tls_dir/cert.pem" -noout -text | grep -c 'X509v3 Basic Constraints' || true)
+fi
 if [[ ! -s $tls_dir/cert.pem || ! -s $tls_dir/privkey.pem ]] ||
+   [[ $constraints -ne 1 ]] ||
    ! openssl x509 -in "$tls_dir/cert.pem" -checkend 2592000 -noout >/dev/null; then
+    # Use an isolated configuration: OpenSSL 1.1.1 can append -addext to the
+    # system v3_ca section, producing duplicate and contradictory constraints.
+    cat > "$backup/openssl.cnf" <<EOF
+[req]
+prompt = no
+distinguished_name = subject
+x509_extensions = server
+[subject]
+CN = $admin_ip
+[server]
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+subjectAltName = IP:$admin_ip
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+EOF
     openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 365 \
-        -subj "/CN=$admin_ip" \
-        -addext "subjectAltName=IP:$admin_ip" \
-        -addext 'basicConstraints=critical,CA:FALSE' \
-        -addext 'keyUsage=critical,digitalSignature,keyEncipherment' \
-        -addext 'extendedKeyUsage=serverAuth' \
+        -config "$backup/openssl.cnf" \
         -keyout "$tls_dir/privkey.pem.next" -out "$tls_dir/cert.pem.next" 2>"$backup/openssl.log"
+    openssl verify -CAfile "$tls_dir/cert.pem.next" "$tls_dir/cert.pem.next"
     chmod 600 "$tls_dir/privkey.pem.next"
     chmod 644 "$tls_dir/cert.pem.next"
     mv "$tls_dir/privkey.pem.next" "$tls_dir/privkey.pem"
@@ -78,24 +140,10 @@ chmod 644 "$nginx_config"
 # The system RPM unit otherwise masks BaoTa's SysV startup entry. Adopt the
 # existing installation so the HTTPS listener also returns after a reboot.
 install -d -m 755 /etc/systemd/system/nginx.service.d
-install -m 644 "$source_dir/admin-nginx-systemd.conf" "$unit_override"
+install -m 644 "$source_dir/admin-nginx-systemd.conf" "$unit_override.next"
+mv "$unit_override.next" "$unit_override"
 unit_changed=1
-systemctl daemon-reload
-if ! systemctl is-active --quiet nginx; then
-    if [[ -s /www/server/nginx/logs/nginx.pid ]]; then
-        old_pid=$(cat /www/server/nginx/logs/nginx.pid)
-        [[ $old_pid =~ ^[0-9]+$ ]] || exit 1
-        [[ $(readlink "/proc/$old_pid/exe") == "$nginx" ]] || exit 1
-        "$nginx" -s quit
-        for attempt in $(seq 1 20); do
-            if ! kill -0 "$old_pid" 2>/dev/null; then break; fi
-            sleep 1
-        done
-        if kill -0 "$old_pid" 2>/dev/null; then echo 'Existing Nginx has not exited.' >&2; exit 1; fi
-    fi
-    systemctl start nginx
-fi
-systemctl enable nginx
+adopt_nginx
 
 python3 - "$env_file" "$admin_ip" <<'PY'
 import os, re, sys
@@ -113,7 +161,7 @@ PY
 systemctl restart fatfish
 healthy=0
 for attempt in $(seq 1 40); do
-    if curl -fsS --max-time 3 http://127.0.0.1:3210/api/health >/dev/null; then healthy=1; break; fi
+    if curl -fs --max-time 3 http://127.0.0.1:3210/api/health >/dev/null; then healthy=1; break; fi
     sleep 2
 done
 [[ $healthy -eq 1 ]] || { echo 'QQ health check failed.' >&2; exit 1; }
@@ -121,7 +169,7 @@ done
 for attempt in $(seq 1 10); do
     if curl --noproxy '*' --cacert "$tls_dir/cert.pem" \
         --resolve "$admin_ip:443:127.0.0.1" -fsS --max-time 5 \
-        "https://$admin_ip/api/session" > "$backup/session-check.json"; then
+        "https://$admin_ip/api/session" > "$backup/session-check.json" 2> "$backup/https-check.err"; then
         python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["authenticated"] is False and d["configured"] is True' "$backup/session-check.json"
         changed=0
         echo "HTTPS entry installed: https://$admin_ip/"
@@ -132,4 +180,5 @@ for attempt in $(seq 1 10); do
     sleep 1
 done
 echo 'HTTPS listener check failed.' >&2
+cat "$backup/https-check.err" >&2
 exit 1
