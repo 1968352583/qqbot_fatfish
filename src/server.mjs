@@ -2,8 +2,17 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
+import { isIP } from 'node:net';
 
-export function createAdminServer({ store, secrets, bot, voice, runtime, publicDir, publicOrigin }) {
+function clientAddress(req, trustProxy) {
+  const peer = req.socket.remoteAddress;
+  const ipv4Peer = peer?.startsWith('::ffff:') ? peer.slice(7) : peer;
+  const loopback = peer === '::1' || (typeof ipv4Peer === 'string' && isIP(ipv4Peer) === 4 && ipv4Peer.startsWith('127.'));
+  const forwarded = req.headers['x-real-ip'];
+  return trustProxy === true && loopback && typeof forwarded === 'string' && isIP(forwarded) ? forwarded : peer;
+}
+
+export function createAdminServer({ store, secrets, bot, voice, runtime, publicDir, publicOrigin, trustProxy = false }) {
   const sessions = new Map(), attempts = new Map();
   let voiceBusy = false;
   const safeUsers = () => store.users().map(({ openid, ...user }) => user);
@@ -14,7 +23,8 @@ export function createAdminServer({ store, secrets, bot, voice, runtime, publicD
     const json = (status, value, extra = {}) => { res.writeHead(status, { ...headers, 'Content-Type': 'application/json; charset=utf-8', ...extra }); res.end(JSON.stringify(value)); };
     try {
       const localHosts = [`127.0.0.1:${res.socket.localPort}`, `localhost:${res.socket.localPort}`];
-      const allowed = publicOrigin ? [new URL(publicOrigin).host, ...localHosts] : localHosts;
+      const publicUrl = publicOrigin ? new URL(publicOrigin) : null;
+      const allowed = publicUrl ? [publicUrl.host, ...localHosts] : localHosts;
       if (!allowed.includes(req.headers.host)) throw fail('访问地址不被允许。', 403);
       const url = new URL(req.url, `http://${req.headers.host}`);
       const mutation = !['GET', 'HEAD'].includes(req.method);
@@ -27,9 +37,9 @@ export function createAdminServer({ store, secrets, bot, voice, runtime, publicD
       const cookies = req.headers.cookie?.split(';').map(x => x.trim()).find(x => x.startsWith('fatfish_session='))?.slice(16);
       const session = sessions.get(cookies);
       const authenticated = session && session.expires > Date.now();
-      const cookie = value => `fatfish_session=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${value ? 43200 : 0}${publicOrigin?.startsWith('https:') ? '; Secure' : ''}`;
+      const cookie = value => `fatfish_session=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${value ? 43200 : 0}${publicUrl?.protocol === 'https:' && req.headers.host === publicUrl.host ? '; Secure' : ''}`;
       if (url.pathname === '/api/login' && req.method === 'POST') {
-        const remote = req.socket.remoteAddress, previous = attempts.get(remote);
+        const remote = clientAddress(req, trustProxy), previous = attempts.get(remote);
         const entry = previous && previous.until > Date.now() ? previous : { count: 0, until: Date.now() + 15 * 60000 };
         if (entry.count >= 5) throw fail('尝试次数较多，请 15 分钟后重试。', 429);
         if (!secrets.verify(body.password)) { entry.count++; attempts.set(remote, entry); throw fail('密码不正确，或尚未完成本机配置。', 401); }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { Store } from '../src/store.mjs';
 import { Bot, proactiveAllowed, reminderInput } from '../src/bot.mjs';
 import { CompanionModel } from '../src/model.mjs';
@@ -14,6 +15,18 @@ function setup() { let now = epoch; const store = new Store(':memory:', { now: (
 const packet = (openid, id, content, at = epoch) => ({ op: 0, t: 'C2C_MESSAGE_CREATE', d: { id, content, timestamp: new Date(at).toISOString(), author: { user_openid: openid } } });
 const answer = bubbles => ({ bubbles, quotes: [], voice: false, sources: [], memoryIds: [] });
 const immediate = async () => {};
+
+function adminLoginFixture(options = {}) {
+  const server = createAdminServer({ secrets: { verify: password => password === 'fixture-admin-password' }, publicOrigin: 'https://admin.example.com', ...options });
+  const handle = server.listeners('request')[0];
+  return async ({ remoteAddress = '127.0.0.1', realIp, forwardedFor, host = 'admin.example.com', origin = 'https://admin.example.com', password = 'fixture-admin-password' } = {}) => {
+    const req = Readable.from([Buffer.from(JSON.stringify({ password }))]);
+    Object.assign(req, { method: 'POST', url: '/api/login', socket: { remoteAddress }, headers: { host, origin, 'content-type': 'application/json', ...(realIp === undefined ? {} : { 'x-real-ip': realIp }), ...(forwardedFor === undefined ? {} : { 'x-forwarded-for': forwardedFor }) } });
+    const result = {};
+    const res = { socket: { localPort: 3210 }, writeHead(status, headers) { Object.assign(result, { status, headers }); }, end(body) { result.body = JSON.parse(body); } };
+    await handle(req, res); return result;
+  };
+}
 
 test('model request contains only this user’s memories and history; cost is settled', async () => {
   const { store, alice, bob } = setup();
@@ -133,6 +146,50 @@ test('admin authentication gates private data and rejects cross-origin writes; c
     const response = await fetch(`${origin}/api/state`, { headers: { Cookie: cookie } }); assert.equal(response.status, 200); assert.doesNotMatch(await response.text(), /fixture-admin-password|fixture-api-secret|alice-openid/);
     assert.equal((await fetch(`${origin}/api/config`, { method: 'PUT', headers: { Cookie: cookie, Origin: 'https://evil.example', 'Content-Type': 'application/json' }, body: '{}' })).status, 403);
   } finally { server.closeAllConnections(); await new Promise(done => server.close(done)); store.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('admin trusted loopback proxy keeps login failures separate for IPv4 and IPv6 visitors', async () => {
+  for (const remoteAddress of ['127.0.0.1', '127.0.0.2', '::1', '::ffff:127.0.0.1']) {
+    const login = adminLoginFixture({ trustProxy: true });
+    for (let i = 0; i < 5; i++) assert.equal((await login({ remoteAddress, realIp: '192.0.2.10', password: 'wrong' })).status, 401);
+    assert.equal((await login({ remoteAddress, realIp: '192.0.2.10' })).status, 429);
+    assert.equal((await login({ remoteAddress, realIp: '2001:db8::20' })).status, 200);
+    assert.equal((await login({ remoteAddress, realIp: '192.0.2.10' })).status, 429);
+    assert.equal((await login({ remoteAddress, realIp: '198.51.100.30' })).status, 200);
+  }
+});
+
+test('admin ignores proxy IP headers unless explicitly enabled for a loopback peer', async () => {
+  for (const { trustProxy, remoteAddress } of [
+    { remoteAddress: '127.0.0.1' }, { trustProxy: false, remoteAddress: '::1' },
+    { trustProxy: true, remoteAddress: '203.0.113.10' }, { trustProxy: true, remoteAddress: '2001:db8::10' },
+    { trustProxy: true, remoteAddress: '::ffff:203.0.113.10' },
+  ]) {
+    const login = adminLoginFixture({ trustProxy });
+    for (let i = 0; i < 5; i++) assert.equal((await login({ remoteAddress, realIp: `192.0.2.${i + 1}`, password: 'wrong' })).status, 401);
+    assert.equal((await login({ remoteAddress, realIp: '198.51.100.10', forwardedFor: '198.51.100.20' })).status, 429);
+  }
+});
+
+test('admin falls back to the socket peer for absent or invalid proxy IPs and ignores X-Forwarded-For', async () => {
+  for (const realIp of [undefined, '', 'invalid', '999.1.1.1', '192.0.2.1, 198.51.100.2', '192.0.2.1:4321', '[2001:db8::1]', ['192.0.2.1', '198.51.100.2']]) {
+    const login = adminLoginFixture({ trustProxy: true });
+    for (let i = 0; i < 5; i++) assert.equal((await login({ realIp, forwardedFor: `192.0.2.${i + 1}`, password: 'wrong' })).status, 401);
+    assert.equal((await login({ forwardedFor: '198.51.100.10' })).status, 429);
+  }
+});
+
+test('admin uses Secure cookies for the HTTPS public host and keeps SSH HTTP login usable', async () => {
+  const login = adminLoginFixture();
+  const publicLogin = await login(); assert.equal(publicLogin.status, 200);
+  assert.match(publicLogin.headers['Set-Cookie'], /; Secure(?:;|$)/);
+  for (const host of ['127.0.0.1:3210', 'localhost:3210']) {
+    const localLogin = await login({ host, origin: `http://${host}` }); assert.equal(localLogin.status, 200);
+    assert.doesNotMatch(localLogin.headers['Set-Cookie'], /; Secure(?:;|$)/);
+    assert.match(localLogin.headers['Set-Cookie'], /; HttpOnly; SameSite=Strict;/);
+  }
+  const httpLogin = await adminLoginFixture({ publicOrigin: 'http://admin.example.com' })({ origin: 'http://admin.example.com' });
+  assert.equal(httpLogin.status, 200); assert.doesNotMatch(httpLogin.headers['Set-Cookie'], /; Secure(?:;|$)/);
 });
 
 test('pending reminders respect cancellation and global off between sends', async () => {

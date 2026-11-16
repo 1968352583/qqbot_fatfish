@@ -27,7 +27,7 @@ jobs:
           node-version: 24.14.1
       - run: npm test
       - run: python3 -m unittest discover -s tests -p '*_test.py'
-      - run: bash -n deploy/receive-release.sh scripts/start.sh
+      - run: bash -n deploy/receive-release.sh deploy/install-admin-https.sh scripts/start.sh
 
   deploy:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'

@@ -4,7 +4,11 @@
 
 已实现管理员网页、独立记忆、可调主动聊天、提醒和预算保护，并配置 GitHub Actions 自动测试与云服务器部署。DeepSeek 负责文字对话和图片理解，QQ 提供语音参考转写；云端语音接入阿里云百炼，支持音色设计、语气指导与后台试听。运行和迁移结果见 [验证记录](docs/validation/app.md)。
 
-日常更新推送到 `main` 即触发测试和部署流程。目前云端已运行，GitHub 测试已通过，自动发布仍受服务器网络连接超时阻碍，见 [任务 #5](https://github.com/1968352583/qqbot_fatfish/issues/5)。访问云端后台时运行 `ssh -N -L 3210:127.0.0.1:3210 root@warma`，再打开 [后台](http://127.0.0.1:3210)。关闭本机或隧道不会停止云端机器人。详见 [部署说明](docs/deployment.md)。
+日常更新推送到 `main` 即触发测试和部署流程。目前云端已运行，GitHub 测试已通过，自动发布仍受服务器网络连接超时阻碍，见 [任务 #5](https://github.com/1968352583/qqbot_fatfish/issues/5)。
+
+公网后台入口为 [https://8.130.14.159](https://8.130.14.159)。在服务器运行 `bash deploy/install-admin-https.sh 8.130.14.159` 完成安装后，手机或其他电脑可直接访问，无需本机开机或建立 SSH 隧道。该入口使用有效期 365 天的自签 IP 证书，浏览器不会自动信任；首次访问须按 [部署说明](docs/deployment.md) 核对证书指纹并处理设备信任。可信 CA 的签发接口目前受服务器出站网络阻塞，尚未取得浏览器默认信任的证书。证书剩余有效期不足 30 天时，重新运行同一脚本更新。
+
+SSH 隧道保留为备用：运行 `ssh -N -L 3210:127.0.0.1:3210 root@warma`，再打开 [本机转发入口](http://127.0.0.1:3210)。关闭本机或隧道不会停止云端机器人。
 
 ## 本地开发与管理
 
@@ -27,7 +31,7 @@
 ## 使用与验证
 
 - [使用说明](docs/usage.md)：个人设置、记忆、提醒、管理员功能及费用规则。
-- [云端部署说明](docs/deployment.md)：GitHub Actions、systemd、SSH 后台、迁移与回滚。
+- [云端部署说明](docs/deployment.md)：GitHub Actions、systemd、IP HTTPS 后台、SSH 备用入口、迁移与回滚。
 - [应用验证记录](docs/validation/app.md)：实际收发、自动测试和限制。
 - [QQ 通道联调](docs/validation/qq-c2c.md)：三条气泡、WAV 语音、窗口外主动发送与重连证据。
 - [需求基线 #1](https://github.com/1968352583/qqbot_fatfish/issues/1)、[实现任务 #3](https://github.com/1968352583/qqbot_fatfish/issues/3)、[调查依据](docs/research/qqbot-feasibility.md)。

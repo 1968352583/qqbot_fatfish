@@ -18,15 +18,48 @@
 
 ## 后台与运维
 
-先在本机终端建立隧道并保持该终端连接：
+公网入口为 [https://8.130.14.159](https://8.130.14.159)，使用原管理员密码。完成下述安装并处理设备上的证书信任后，手机或其他电脑可直接访问，不依赖本机开机或 SSH 隧道。
+
+### IP HTTPS 安装与证书更新
+
+将部署文件传到服务器后，以 root 运行：
+
+```bash
+bash deploy/install-admin-https.sh 8.130.14.159
+```
+
+入口复用宝塔 Nginx `/www/server/nginx/sbin/nginx`，独立配置位于 `/www/server/panel/vhost/nginx/zz-fatfish-admin.conf`。该 IP 的 HTTP 80 请求跳转到 HTTPS；HTTPS 443 反代到 `127.0.0.1:3210`。应用继续仅监听回环地址，环境配置使用：
+
+```dotenv
+ADMIN_ORIGIN=https://8.130.14.159
+ADMIN_TRUST_PROXY=1
+```
+
+`ADMIN_TRUST_PROXY=1` 用于识别本机 Nginx 转发的 HTTPS 请求，应与回环监听一起使用；不要把应用端口 3210 直接开放到公网。云安全组和系统防火墙需允许入口使用的 80、443 端口。
+
+证书为自签叶证书，包含 IP SAN `8.130.14.159`、`CA:FALSE`，有效期 365 天。证书文件为 `/etc/fatfish/tls/cert.pem`，私钥为 `/etc/fatfish/tls/privkey.pem`；私钥权限为 `0600`，仅保存在服务器，不能放入仓库或传给访问设备。浏览器不会自动信任自签证书，这不代表已取得可信 CA 签发的证书。
+
+首次从新设备访问时，先通过已核实主机密钥的 SSH 连接读取证书指纹及有效期：
+
+```bash
+ssh root@warma 'openssl x509 -in /etc/fatfish/tls/cert.pem -noout -fingerprint -sha256 -dates'
+```
+
+核对浏览器显示的 SHA-256 指纹一致后，再按设备支持的方式信任该证书或添加访问例外；需要导入时仅使用 `cert.pem`，不要导出私钥。证书更新后需重新核对新指纹，部分设备也需重新处理信任。不要忽略指纹不符的警告。
+
+证书剩余有效期不足 30 天时，在服务器重新运行 `bash deploy/install-admin-https.sh 8.130.14.159` 更新，并检查新有效期和指纹；剩余有效期充足时脚本保留现有证书。当前方案需手动更新，没有可信 CA 自动续期。2026-11-16 的排查中，服务器直连 Let's Encrypt 生产和测试 ACME 接口均发生 TCP 超时，可信 CA 签发受出站网络阻塞；此处记录的是自签 HTTPS 配置步骤，实际验收结果见 [验证记录](validation/app.md)。
+
+### SSH 备用入口与运维
+
+公网入口或设备证书信任暂不可用时，可在本机终端建立隧道并保持连接：
 
 ```bash
 ssh -N -L 3210:127.0.0.1:3210 root@warma
 ```
 
-然后打开 [管理员后台](http://127.0.0.1:3210)，使用原管理员密码。隧道只用于打开后台；断开隧道、关闭电脑都不影响服务器上的机器人。
+然后打开 [备用管理员后台](http://127.0.0.1:3210)，使用原管理员密码。隧道只用于这条备用访问路径；断开隧道、关闭电脑都不影响服务器上的机器人。
 
-服务仅监听服务器 `127.0.0.1:3210`，没有开放新的公网管理端口，也没有更改已有网站。若本地 3210 被占用，先停止占用它的本机应用；使用其他本地端口需要相应设置 `ADMIN_ORIGIN`，不能只换隧道端口而不调整 Host/Origin 校验。
+服务仍仅监听服务器 `127.0.0.1:3210`，公网请求由 Nginx 转发。若本地 3210 被占用，先停止占用它的本机应用；不要只换隧道端口而不核对 Host/Origin 校验。
 
 ```bash
 ssh root@warma 'systemctl status fatfish --no-pager'
@@ -46,6 +79,9 @@ ssh root@warma 'curl -fsS http://127.0.0.1:3210/api/health'
 | `/opt/fatfish/runtime` | 校验过的 Node.js 24.14.1 Linux 运行时 |
 | `/var/lib/fatfish` | SQLite 数据库、后台保存的凭据覆盖和进程锁，仅应用账号可读写 |
 | `/etc/fatfish/fatfish.env` | QQ、DeepSeek 和管理员环境配置，root 与应用账号可读 |
+| `/etc/fatfish/tls/cert.pem` | 公网后台的自签 IP 叶证书，可供访问设备核对或导入 |
+| `/etc/fatfish/tls/privkey.pem` | TLS 私钥，root 专用、权限 `0600`，仅留在服务器 |
+| `/www/server/panel/vhost/nginx/zz-fatfish-admin.conf` | 宝塔 Nginx 的 IP HTTPS 入口与回环反代配置 |
 | `/usr/local/sbin/fatfish-deploy` | root 管理的受限发布入口 |
 
 GitHub `production` 环境只保存 `DEPLOY_HOST`、`DEPLOY_KEY`、`DEPLOY_KNOWN_HOSTS`。这把 SSH 密钥属于独立的 `fatfish-deploy` 账号，通过强制命令和 sudo 限定到发布入口，不能直接取得任意 SSH shell。服务器主机密钥在安装时核实并固定，部署时不临时接受陌生主机密钥。应用业务密钥不进入 GitHub。
