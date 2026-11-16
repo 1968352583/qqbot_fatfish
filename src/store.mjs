@@ -19,6 +19,7 @@ export class Store {
         role TEXT NOT NULL, content TEXT NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL, sources TEXT NOT NULL DEFAULT '[]', memories TEXT NOT NULL DEFAULT '[]');
       CREATE INDEX IF NOT EXISTS messages_user_at ON messages(user_id, at);
       CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), text TEXT NOT NULL, sources TEXT NOT NULL, at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS memory_kinds (memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE, kind TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS reminders (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), text TEXT NOT NULL, due INTEGER NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending', note TEXT NOT NULL DEFAULT '', next_try INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS usage (id TEXT PRIMARY KEY, month TEXT NOT NULL, kind TEXT NOT NULL, amount REAL NOT NULL, status TEXT NOT NULL, at INTEGER NOT NULL);
@@ -26,6 +27,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS receipts (remote_id TEXT PRIMARY KEY, at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS invites (hash TEXT PRIMARY KEY, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0);
     `);
+    const userColumns = new Set(this.db.prepare('PRAGMA table_info(users)').all().map(row => row.name));
+    if (!userColumns.has('last_proactive_check')) this.db.exec('ALTER TABLE users ADD COLUMN last_proactive_check INTEGER NOT NULL DEFAULT 0');
     const reminderColumns = new Set(this.db.prepare('PRAGMA table_info(reminders)').all().map(row => row.name));
     for (const [name, initial] of [['delivery_text', "''"], ['delivery_sources', "'[]'"], ['delivery_memories', "'[]'"], ['source_ids', "'[]'"]]) {
       if (!reminderColumns.has(name)) this.db.exec(`ALTER TABLE reminders ADD COLUMN ${name} TEXT NOT NULL DEFAULT ${initial}`);
@@ -67,11 +70,13 @@ export class Store {
   messages(userId, { limit = 100, offset = 0, context = false } = {}) {
     return this.db.prepare(`SELECT * FROM messages WHERE user_id=? ${context ? "AND kind != 'command'" : ''} ORDER BY at DESC, rowid DESC LIMIT ? OFFSET ?`).all(userId, limit, offset).reverse().map(row => ({ ...row, sources: parse(row.sources), memories: parse(row.memories) }));
   }
-  memories(userId) { return this.db.prepare('SELECT * FROM memories WHERE user_id=? ORDER BY at').all(userId).map(row => ({ ...row, sources: parse(row.sources) })); }
-  remember(userId, text, sources = []) {
+  memories(userId) { return this.db.prepare("SELECT memories.*, COALESCE(memory_kinds.kind, 'fact') kind FROM memories LEFT JOIN memory_kinds ON memory_kinds.memory_id=memories.id WHERE user_id=? ORDER BY at").all(userId).map(row => ({ ...row, sources: parse(row.sources) })); }
+  remember(userId, text, sources = [], { kind = 'fact' } = {}) {
+    if (!['fact', 'experience', 'habit'].includes(kind)) throw new Error('记忆类型无效。');
     const value = text.trim().slice(0, 500); if (!value) return;
     if (this.memories(userId).some(row => row.text === value)) return;
-    const id = randomUUID(); this.db.prepare('INSERT INTO memories VALUES (?,?,?,?,?)').run(id, userId, value, json(sources), this.now()); return id;
+    const id = randomUUID(); this.db.prepare('INSERT INTO memories(id,user_id,text,sources,at) VALUES (?,?,?,?,?)').run(id, userId, value, json(sources), this.now());
+    this.db.prepare('INSERT INTO memory_kinds(memory_id,kind) VALUES (?,?)').run(id, kind); return id;
   }
   forget(userId, { memoryId, messageId, keyword, replacement } = {}) {
     const result = this.transaction(() => {
@@ -136,6 +141,7 @@ export class Store {
   pendingReminder(id) { return this.db.prepare("SELECT * FROM reminders WHERE id=? AND status='pending'").get(id); }
   markReminder(id, status, note = '', nextTry = 0) { this.db.prepare('UPDATE reminders SET status=?, note=?, next_try=? WHERE id=?').run(status, note, nextTry, id); }
   busy(id) { this.db.prepare('UPDATE users SET busy_until=? WHERE id=?').run(this.now() + this.preferences(id).busyHours * 3600000, id); }
+  checkedProactive(id) { this.db.prepare('UPDATE users SET last_proactive_check=? WHERE id=?').run(this.now(), id); }
   initiated(id) {
     const user = this.user(id), p = this.preferences(id), day = chinaDate(this.now());
     const count = user.proactive_day === day ? user.proactive_count + 1 : 1;

@@ -1,9 +1,11 @@
+import { defaultCharacter } from './character.mjs';
+
 export const defaults = {
-  enabled: true, proactiveEnabled: true,
-  character: '你叫大肥鱼，是活泼、亲近、会接梗、有一点调皮的 AI 朋友。用自然的中文短句交流，关心对方但不过度追问。不要把自己说成真人，不编造双方没有经历过的事情。尊重对方说忙、拒绝或想独处的意愿。不声称能操作其他软件。',
+  enabled: true, proactiveEnabled: true, autoMemory: true, proactiveAllowCasual: true,
+  character: defaultCharacter,
   model: 'deepseek-flash', modelBaseUrl: 'https://api.deepseek.com',
   maxBubbles: 3, replyGapMs: 1200, contextMessages: 24, retentionDays: 30,
-  proactiveDaily: 2, startHour: 9, endHour: 22, intervalHours: 3,
+  proactiveDaily: 2, startHour: 9, endHour: 22, intervalHours: 3, proactiveRetryHours: 1,
   busyHours: 4, unansweredLimit: 2, unansweredPauseHours: 24,
   reminderGraceMinutes: 10,
   autoVoice: true, autoVoiceChance: 0.1, voiceWithText: false,
@@ -19,7 +21,7 @@ export const defaults = {
 export const personalKeys = ['proactiveEnabled', 'proactiveDaily', 'startHour', 'endHour', 'intervalHours', 'busyHours', 'unansweredLimit', 'unansweredPauseHours', 'autoVoice', 'voiceWithText'];
 const ranges = {
   maxBubbles: [1, 3], replyGapMs: [0, 10000], contextMessages: [2, 80], retentionDays: [1, 365],
-  proactiveDaily: [0, 20], startHour: [0, 23], endHour: [1, 24], intervalHours: [0.1, 48],
+  proactiveDaily: [0, 20], startHour: [0, 23], endHour: [1, 24], intervalHours: [0.1, 48], proactiveRetryHours: [0.1, 48],
   busyHours: [0.1, 168], unansweredLimit: [1, 10], unansweredPauseHours: [1, 168],
   reminderGraceMinutes: [0, 120], autoVoiceChance: [0, 1], voiceRate: [100, 250],
   totalBudget: [0, 100000], fixedReserve: [0, 100000], safetyReserve: [0, 100000],

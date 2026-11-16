@@ -1,15 +1,22 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { chinaDate, chinaHour } from './config.mjs';
 import { ReminderCommands, reminderDelivery } from './reminders.mjs';
+import { applyMemoryUpdates } from './memory.mjs';
 export { reminderInput } from './reminders.mjs';
 
-export function proactiveAllowed(user, config, usage, now) {
+export function proactiveAllowed(user, config, usage, now, { ignoreCheck = false } = {}) {
   if (!config.enabled || !config.proactiveEnabled || !user.enabled || config.proactiveDaily === 0) return false;
   if (['reduced', 'stopped'].includes(usage.level) || user.busy_until > now || user.pause_until > now) return false;
   const hour = chinaHour(now);
   if (hour < config.startHour || hour >= config.endHour) return false;
   if (user.proactive_day === chinaDate(now) && user.proactive_count >= config.proactiveDaily) return false;
+  if (!ignoreCheck && user.last_proactive_check && now - user.last_proactive_check < (config.proactiveRetryHours ?? 1) * 3600000) return false;
   return user.last_inbound > 0 && now - Math.max(user.last_inbound, user.last_proactive) >= config.intervalHours * 3600000;
+}
+
+// Explicit, present-tense boundaries only; quoted or future plans are not a pause.
+export function wantsQuiet(text) {
+  return /^(?:我)?(?:先不聊(?:了)?|先(?:去)?休息|先(?:去)?睡(?:觉)?|要(?:去)?睡(?:觉)?|想(?:自己|一个人)(?:待|静|呆)一会儿)(?:[，,。！!\s]|$)/u.test(text);
 }
 
 export class Bot {
@@ -64,10 +71,20 @@ export class Bot {
       if (!this.store.preferences(user.id).enabled) return;
       if (hasVoice && !transcripts.length) { await this.deliver(user.id, ['这段语音我暂时没听清，可以再说一次，或发文字给我吗？'], input); return; }
       if (unsupported && !raw && !images.length && !transcripts.length) { await this.deliver(user.id, ['这条附件我暂时看不明白，可以发普通图片或描述一下吗？'], input); return; }
-      const response = await this.model.respond(user.id, { images, signal: controller.signal });
+      if (kind === 'text' && wantsQuiet(raw)) this.store.busy(user.id);
+      let response = await this.model.respond(user.id, { images, signal: controller.signal });
       if (!this.current(user.id, input)) return;
-      // Exact quotes from current text only. No guessed or transcribed facts enter memory.
-      if (kind === 'text') for (const quote of response.quotes) if (raw.includes(quote) && /我|叫我|喜欢|讨厌|习惯|记住|生日|工作|面试/.test(quote) && !/[?？]/.test(quote)) this.store.remember(user.id, quote, [messageId]);
+      const memoryResult = applyMemoryUpdates({ store: this.store, userId: user.id, input, response });
+      if (memoryResult.edited) {
+        input.revision = this.store.user(user.id).revision;
+        // The old response and edit request may contain forgotten facts. Generate
+        // afresh from cleaned history without passing the raw edit back in.
+        try { response = await this.model.respond(user.id, { signal: controller.signal, memoryOutcome: memoryResult.memoryOutcome }); }
+        catch {
+          response = { bubbles: [memoryResult.memoryOutcome.action === 'corrected' ? '嗯，按你刚说的来。' : '好，那就不提了。'], voice: false, quotes: [], sources: [], memoryIds: [] };
+        }
+      }
+      if (!this.current(user.id, input)) return;
       await this.respond(user.id, response, input);
     } catch (error) {
       if (!controller.signal.aborted) {
@@ -109,6 +126,7 @@ export class Bot {
     return sent;
   }
   async respond(userId, response, input, proactive = false) {
+    if (proactive && response.skipped) return;
     const prefs = this.store.preferences(userId), text = response.bubbles.join(' ');
     const explicit = !proactive && /用语音|语音回|说给我听/.test(input.raw);
     const automatic = prefs.autoVoice && response.voice && this.random() < prefs.autoVoiceChance && !['reduced', 'stopped'].includes(this.store.usage().level);
@@ -182,12 +200,15 @@ export class Bot {
       }
       for (const user of this.store.users()) {
         if (this.jobs.has(user.id) || (this.cooldowns.get(user.id) ?? 0) > now || !proactiveAllowed(user, this.store.preferences(user.id), this.store.usage(), now)) continue;
-        this.cooldowns.set(user.id, now + 3600000);
+        this.cooldowns.set(user.id, now + this.store.config().proactiveRetryHours * 3600000);
+        // Persist before the provider call, including interrupted attempts.
+        // Considering an opening is neither a sent message nor an unanswered one.
+        this.store.checkedProactive(user.id);
         const controller = new AbortController(); this.jobs.set(user.id, controller);
         try {
           const input = { revision: user.revision, signal: controller.signal };
           const response = await this.model.respond(user.id, { proactive: true, signal: controller.signal });
-          if (proactiveAllowed(this.store.user(user.id), this.store.preferences(user.id), this.store.usage(), this.store.now())) await this.respond(user.id, response, input, true);
+          if (!response.skipped && proactiveAllowed(this.store.user(user.id), this.store.preferences(user.id), this.store.usage(), this.store.now(), { ignoreCheck: true })) await this.respond(user.id, response, input, true);
         } catch (error) { if (!controller.signal.aborted) this.log('proactive', error.message); }
         finally { if (this.jobs.get(user.id) === controller) this.jobs.delete(user.id); }
       }

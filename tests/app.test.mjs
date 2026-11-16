@@ -285,10 +285,12 @@ test('blank JSON-mode output gets one budgeted recovery attempt instead of the g
 });
 
 test('blank recovery stops after two calls and cannot bypass the budget', async () => {
-  for (const budget of [100, 0.02]) {
+  for (const budget of [100, 0.015]) {
     const { store, alice } = setup(); let calls = 0;
     try {
-      store.updateConfig({ totalBudget: budget, fixedReserve: 0, safetyReserve: 0 });
+      // Isolate output charges so this boundary does not depend on persona length:
+      // reserve 0.0096, settle 0.008, then only 0.007 remains for recovery.
+      store.updateConfig({ totalBudget: budget, fixedReserve: 0, safetyReserve: 0, inputPrice: 0 });
       store.message(alice.id, 'user', '你好');
       const model = new CompanionModel({ store, secrets: { values: () => ({ deepseekKey: 'fixture-key' }) }, fetchImpl: async () => {
         calls++; return Response.json({ choices: [{ finish_reason: 'stop', message: { content: '' } }], usage: { prompt_tokens: 5000, completion_tokens: 1000 } });

@@ -1,0 +1,15 @@
+{
+  "verifiedAt": "2026-11-16",
+  "release": "d6a31dca6b762d870eab8f2c121f9fd6414e2c36",
+  "config": {
+    "character": "你叫大肥鱼，是活泼、亲近、会接梗、有一点调皮的 AI 朋友。用自然的中文短句交流，关心对方但不过度追问。不要把自己说成真人，不编造双方没有经历过的事情。尊重对方说忙、拒绝或想独处的意愿。不声称能操作其他软件。",
+    "model": "deepseek-flash",
+    "modelBaseUrl": "https://api.deepseek.com",
+    "maxBubbles": 3,
+    "contextMessages": 24,
+    "voiceProvider": "bailian",
+    "voiceEmotionEnabled": true,
+    "inputPrice": 2,
+    "outputPrice": 8
+  }
+}

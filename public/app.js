@@ -24,7 +24,7 @@ function openDialog({ title, description = '', value, confirm = '保存', onSave
   $('#dialog').showModal();
 }
 const labels = {
-  enabled: '机器人总开关', proactiveEnabled: '允许主动聊天', character: '基础角色卡', model: '模型名称', modelBaseUrl: '模型地址',
+  enabled: '机器人总开关', proactiveEnabled: '允许主动聊天', autoMemory: '自动积累共同经历与相处习惯', proactiveAllowCasual: '允许轻松开新话题', proactiveRetryHours: '未开场时再次考虑的间隔（小时）', character: '基础角色卡', model: '模型名称', modelBaseUrl: '模型地址',
   maxBubbles: '每次最多几个气泡', replyGapMs: '气泡间隔（毫秒）', contextMessages: '近期上下文消息数', retentionDays: '聊天记录保留（天）',
   proactiveDaily: '每日主动开场上限', startHour: '开始时段（北京时间）', endHour: '结束时段（北京时间）', intervalHours: '主动最小间隔（小时）',
   busyHours: '表示忙碌后暂停（小时）', unansweredLimit: '连续未回复次数', unansweredPauseHours: '未回复后暂停（小时）', reminderGraceMinutes: '提醒补发窗口（分钟）',
@@ -68,7 +68,7 @@ async function chats(container) {
   history.append(list); const paging = node('div', undefined, 'actions'); if (older) paging.append(button('较新的记录', () => { older = Math.max(0, older - 100); render(); })); if (messages.length === 100) paging.append(button('更早的记录', () => { older += 100; render(); })); history.append(paging);
   const memoryCard = card('长期记忆', '更正或遗忘时，同步清理关联旧记录。'); memoryCard.append(button('＋ 添加记忆', () => openDialog({ title: '添加长期记忆', value: '', onSave: text => api(`/users/${selectedUser}/memories`, 'POST', { text }) })));
   if (!memories.length) memoryCard.append(node('p', '记忆从每一次认真倾听开始。', 'empty'));
-  for (const memory of memories) { const item = node('div', undefined, 'memory'), actions = node('div', undefined, 'memory-actions'); actions.append(button('更正', () => openDialog({ title: '更正长期记忆', description: '关联旧记录会同步清理，避免旧事实再次出现。', value: memory.text, onSave: text => api(`/users/${selectedUser}/memories/${memory.id}`, 'PUT', { text }) }), 'text-button'), button('忘记', () => openDialog({ title: '忘记这条信息？', description: '这会删除记忆及关联旧记录。', confirm: '忘记', onSave: () => api(`/users/${selectedUser}/memories/${memory.id}`, 'DELETE', {}) }), 'text-button')); item.append(node('p', memory.text), actions); memoryCard.append(item); }
+  for (const memory of memories) { const item = node('div', undefined, 'memory'), actions = node('div', undefined, 'memory-actions'); actions.append(button('更正', () => openDialog({ title: '更正长期记忆', description: '关联旧记录会同步清理，避免旧事实再次出现。', value: memory.text, onSave: text => api(`/users/${selectedUser}/memories/${memory.id}`, 'PUT', { text }) }), 'text-button'), button('忘记', () => openDialog({ title: '忘记这条信息？', description: '这会删除记忆及关联旧记录。', confirm: '忘记', onSave: () => api(`/users/${selectedUser}/memories/${memory.id}`, 'DELETE', {}) }), 'text-button')); item.append(node('div', `${({ fact: '资料', experience: '共同经历', habit: '相处习惯' })[memory.kind] ?? '资料'} · ${time(memory.at)}`, 'muted small'), node('p', memory.text), actions); memoryCard.append(item); }
   grid.append(history, memoryCard); container.append(grid); list.scrollTop = list.scrollHeight;
 }
 function preferenceDialog(id) {
@@ -124,9 +124,9 @@ async function render() {
   const container = node('div'); $('#content').replaceChildren(container);
   if (page === 'overview') overview(container);
   if (page === 'chats') await chats(container);
-  if (page === 'character') container.append(settingsForm('人设与说话方式', '共享基础角色，各自积累相处习惯。可以修改下面的角色卡。', ['enabled', 'character', 'maxBubbles', 'replyGapMs', 'contextMessages', 'retentionDays']));
+  if (page === 'character') container.append(settingsForm('人设与说话方式', '共享基础角色，各自积累相处习惯。自动记忆保留原话依据，可在聊天与记忆中更正或遗忘。', ['enabled', 'character', 'autoMemory', 'maxBubbles', 'replyGapMs', 'contextMessages', 'retentionDays']));
   if (page === 'interaction') {
-    container.append(settingsForm('主动聊天', '一个开场即使有多个气泡，也只计一次。用户回来聊天会提前结束忙碌暂停。', ['proactiveEnabled', 'proactiveDaily', 'startHour', 'endHour', 'intervalHours', 'busyHours', 'unansweredLimit', 'unansweredPauseHours', 'reminderGraceMinutes']), settingsForm('语音与表达', '语音合成失败时自动使用对应文字回复。修改语音方式后保存，可查看相应设置。', ['autoVoice', 'autoVoiceChance', 'voiceWithText', 'voiceProvider']));
+    container.append(settingsForm('主动聊天', '次数是上限。没有合适内容可以不发，也不计未回复；关闭轻松开新话题后只回访有依据的旧话题。用户回来聊天会提前结束忙碌暂停。', ['proactiveEnabled', 'proactiveAllowCasual', 'proactiveDaily', 'startHour', 'endHour', 'intervalHours', 'proactiveRetryHours', 'busyHours', 'unansweredLimit', 'unansweredPauseHours', 'reminderGraceMinutes']), settingsForm('语音与表达', '语音合成失败时自动使用对应文字回复。修改语音方式后保存，可查看相应设置。', ['autoVoice', 'autoVoiceChance', 'voiceWithText', 'voiceProvider']));
     if (state.config.voiceProvider === 'bailian') container.append(settingsForm('百炼声音设置', '选择声音、调整日常语气。开启自动情绪后，会根据当前角色和聊天内容轻微调整表达。API Key 在「模型与预算」中管理。', ['bailianWorkspace', 'bailianVoice', 'voiceInstruction', 'voiceEmotionEnabled', 'voiceSpeed', 'voicePitch', 'voiceVolume']), voiceStudio());
     if (state.config.voiceProvider === 'system') container.append(settingsForm('本机声音设置', '只适用于 macOS。', ['voiceName', 'voiceRate']));
     if (state.config.voiceProvider === 'http') container.append(settingsForm('通用接口设置', '接口需接受兼容的合成请求并返回 WAV 音频。', ['voiceName', 'voiceModel', 'voiceEndpoint']));
