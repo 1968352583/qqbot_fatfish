@@ -1,3 +1,5 @@
+import { modelTokenUsage } from './usage.mjs';
+
 const memoryKinds = new Set(['fact', 'experience', 'habit']);
 const beijingTime = at => Number.isFinite(at) ? new Date(at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : null;
 
@@ -44,33 +46,47 @@ export class CompanionModel {
     const maxTokens = 1200;
     const textBytes = Buffer.byteLength(JSON.stringify(messages.map(m => ({ role: m.role, content: Array.isArray(m.content) ? m.content.filter(block => block.type === 'text') : m.content }))), 'utf8');
     const reserved = ((textBytes + images.length * 1200 + 500) * config.inputPrice + maxTokens * config.outputPrice) / 1e6;
-    const callId = this.store.reserve(proactive ? 'proactive' : 'conversation', reserved, proactive);
-    let settled = false;
+    const purpose = recovery ? 'recovery' : memoryOutcome ? 'memory' : agreement ? 'agreement' : proactive ? 'proactive' : 'conversation';
+    const callId = this.store.reserve(proactive ? 'proactive' : 'conversation', reserved, proactive, { modelUsage: { model: config.model, purpose, outcome: 'pending' } });
+    let settled = false, responseRecorded = false;
+    const recordOutcome = outcome => this.store.recordUsage(callId, { modelUsage: { outcome } });
     try {
       const response = await this.fetch(`${config.modelBaseUrl.replace(/\/$/, '')}/chat/completions`, {
         method: 'POST', redirect: 'error', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: config.model, messages, max_tokens: maxTokens, thinking: { type: 'disabled' }, ...(recovery ? {} : { response_format: { type: 'json_object' } }), stream: false }),
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(45000)]) : AbortSignal.timeout(45000),
       });
-      if (!response.ok) { this.store.settle(callId, 0, 'rejected'); settled = true; throw new Error(`模型请求失败（HTTP ${response.status}）。`); }
-      const data = await response.json();
-      const input = data.usage?.prompt_tokens, output = data.usage?.completion_tokens;
-      const cost = Number.isFinite(input) && input >= 0 && Number.isFinite(output) && output >= 0 ? (input * config.inputPrice + output * config.outputPrice) / 1e6 : undefined;
-      this.store.settle(callId, cost); settled = true;
+      let data;
+      try { data = await response.json(); } catch (error) { if (response.ok) throw error; }
+      const tokens = modelTokenUsage(data?.usage);
+      const reported = Object.values(tokens).some(value => value !== null);
+      const cost = tokens.promptTokens !== null && tokens.completionTokens !== null ? (tokens.promptTokens * config.inputPrice + tokens.completionTokens * config.outputPrice) / 1e6 : undefined;
+      const metadata = { ...tokens, ...(typeof data?.model === 'string' && /^[a-zA-Z0-9_.:/-]{1,120}$/.test(data.model) ? { model: data.model } : {}) };
+      if (!response.ok) {
+        const rejected = response.status >= 400 && response.status < 500 && response.status !== 408 && !reported;
+        // A billed error can carry usage (for example a safety rejection). Its
+        // reported consumption must survive even though no reply can be sent.
+        this.store.settle(callId, rejected ? 0 : cost, rejected ? 'rejected' : cost === undefined ? 'estimated' : 'settled', { modelUsage: { ...metadata, outcome: rejected ? 'rejected' : reported ? 'failed' : 'uncertain' } });
+        settled = true; throw new Error(`模型请求失败（HTTP ${response.status}）。`);
+      }
+      // Persist usage before interpreting generated text or deciding to retry.
+      this.store.settle(callId, cost, 'settled', { modelUsage: { ...metadata, outcome: 'succeeded' } }); settled = true; responseRecorded = true;
       const provenance = { sources: [...history.map(row => row.id), ...upcoming.map(r => `reminder:${r.id}`)], memoryIds: memories.map(m => m.id) };
       const skip = () => ({ decision: 'skip', skipped: true, bubbles: [], voice: false, voiceInstruction: '', quotes: [], memoryCandidates: [], memoryEdits: [], reminderText: '', ...provenance });
-      if (data.choices?.[0]?.finish_reason === 'length') { if (proactive) return skip(); throw new Error('模型回复过长，请稍后重试。'); }
-      const content = data.choices?.[0]?.message?.content;
+      if (data?.choices?.[0]?.finish_reason === 'length') { recordOutcome('failed'); if (proactive) return skip(); throw new Error('模型回复过长，请稍后重试。'); }
+      const content = data?.choices?.[0]?.message?.content;
       let result;
       try { result = JSON.parse(typeof content === 'string' ? content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '') : ''); } catch {}
-      if (proactive && (result?.decision !== 'send' || !Array.isArray(result.bubbles) || !result.bubbles.length || result.bubbles.length > config.maxBubbles || result.bubbles.some(x => typeof x !== 'string' || !x.trim()))) return skip();
+      if (proactive && result?.decision === 'skip' && Array.isArray(result.bubbles) && !result.bubbles.length) return skip();
+      if (proactive && (result?.decision !== 'send' || !Array.isArray(result.bubbles) || !result.bubbles.length || result.bubbles.length > config.maxBubbles || result.bubbles.some(x => typeof x !== 'string' || !x.trim()))) { recordOutcome('failed'); return skip(); }
       let bubbles = Array.isArray(result?.bubbles) ? result.bubbles.filter(x => typeof x === 'string' && x.trim()).slice(0, bubbleLimit).map(x => x.trim().slice(0, 500)) : [];
-      if (!bubbles.length && !recovery) return this.respond(userId, { proactive, images, signal, recovery: true, agreement, memoryOutcome });
+      if (!bubbles.length && !recovery) { recordOutcome('failed'); return this.respond(userId, { proactive, images, signal, recovery: true, agreement, memoryOutcome }); }
       if (!bubbles.length && recovery && typeof content === 'string' && content.trim() && !/^[{\[]|^```/.test(content.trim())) bubbles = [content.trim().slice(0, 500)];
       if (!bubbles.length) throw new Error('模型没有返回有效回复。');
       return { ...(proactive ? { decision: 'send', skipped: false } : {}), bubbles, voice: !recovery && result?.voice === true, voiceInstruction: voiceGuide && typeof result?.voiceInstruction === 'string' ? result.voiceInstruction.trim().slice(0, 160) : '', ...(!proactive && !agreement && !memoryOutcome && !recovery ? memoryProposals(result, current, contextIds, new Set(memories.map(m => m.id)), config.autoMemory) : { quotes: [], memoryCandidates: [], memoryEdits: [] }), reminderText: !recovery && agreement?.action === 'saved' && typeof result?.reminderText === 'string' ? result.reminderText.trim().slice(0, 500) : '', ...provenance };
     } catch (error) {
-      if (!settled) this.store.settle(callId, undefined);
+      if (!settled) this.store.settle(callId, undefined, 'estimated', { modelUsage: { outcome: 'uncertain' } });
+      else if (responseRecorded) recordOutcome('failed');
       if (signal?.aborted) throw signal.reason;
       if (/^模型/.test(error.message)) throw error;
       if (error.name === 'TimeoutError') throw new Error('模型请求超时（45 秒）。');

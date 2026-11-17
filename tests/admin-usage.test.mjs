@@ -6,7 +6,40 @@ import { join } from 'node:path';
 import { Store } from '../src/store.mjs';
 import { Secrets } from '../src/secrets.mjs';
 import { Billing } from '../src/billing.mjs';
+import { DeepSeekBalance } from '../src/deepseek-balance.mjs';
 import { createAdminServer } from '../src/server.mjs';
+
+test('DeepSeek account query is administrator-only, refresh is same-origin, and existing key stays server-side', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'fatfish-deepseek-admin-'));
+  const store = new Store(':memory:');
+  const secrets = new Secrets(join(dir, 'secrets.json'), { ADMIN_PASSWORD: 'fixture-admin-password', DEEPSEEK_API_KEY: 'fixture-deepseek-key' });
+  let calls = 0;
+  const deepseekBalance = new DeepSeekBalance({ store, secrets, fetchImpl: async (url, options) => {
+    calls++; assert.equal(url, 'https://api.deepseek.com/user/balance');
+    assert.equal(options.headers.Authorization, 'Bearer fixture-deepseek-key');
+    return Response.json({ is_available: true, balance_infos: [{ currency: 'CNY', total_balance: '12.50', granted_balance: '2.50', topped_up_balance: '10.00' }] });
+  } });
+  const server = createAdminServer({ store, secrets, deepseekBalance, bot: { stop() {} }, runtime: { gateway: 'ready' } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  try {
+    assert.equal((await fetch(`${origin}/api/deepseek-balance`)).status, 401);
+    assert.equal((await fetch(`${origin}/api/deepseek-balance/refresh`, { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: '{}' })).status, 401);
+    assert.equal(calls, 0);
+    const login = await fetch(`${origin}/api/login`, { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'fixture-admin-password' }) });
+    const headers = { Cookie: login.headers.get('set-cookie').split(';')[0], Origin: origin, 'Content-Type': 'application/json' };
+    const snapshot = await (await fetch(`${origin}/api/deepseek-balance`, { headers })).json();
+    assert.equal(snapshot.status, 'ready'); assert.equal(snapshot.balances[0].total, '12.50');
+    assert.doesNotMatch(JSON.stringify(snapshot), /fixture-deepseek-key|Authorization|Bearer/);
+    assert.equal((await fetch(`${origin}/api/deepseek-balance/refresh`, { method: 'POST', headers: { ...headers, Origin: 'https://other.example' }, body: '{}' })).status, 403);
+    assert.equal(calls, 1);
+    assert.equal((await fetch(`${origin}/api/deepseek-balance/refresh`, { method: 'POST', headers, body: '{}' })).status, 200);
+    assert.equal(calls, 2);
+    await fetch(`${origin}/api/config`, { method: 'PUT', headers, body: JSON.stringify({ modelBaseUrl: 'https://gateway.example/v1' }) });
+    const unsupported = await (await fetch(`${origin}/api/deepseek-balance`, { headers })).json();
+    assert.equal(unsupported.status, 'unsupported'); assert.deepEqual(unsupported.balances, []); assert.equal(calls, 2);
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); store.close(); await rm(dir, { recursive: true, force: true }); }
+});
 
 test('usage and account routes require admin login; refresh requires same origin; billing credentials never echo', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'fatfish-admin-usage-'));

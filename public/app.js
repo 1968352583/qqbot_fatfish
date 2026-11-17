@@ -1,16 +1,26 @@
 const $ = selector => document.querySelector(selector);
 const node = (tag, text, className) => { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (className) e.className = className; return e; };
 const button = (text, fn, cls = 'secondary') => { const e = node('button', text, cls); e.type = 'button'; e.onclick = () => Promise.resolve(fn()).catch(error => toast(error.message)); return e; };
-let state, selectedUser, page = 'overview', older = 0, toastTimer;
+let state, selectedUser, page = 'overview', older = 0, toastTimer, usageView = 'model';
 const audioUrls = new Set();
 function toast(text) { $('#toast').textContent = text; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 4500); }
 async function api(path, method = 'GET', data) { const response = await fetch(`/api${path}`, { method, headers: method === 'GET' ? {} : { 'Content-Type': 'application/json' }, body: data === undefined ? undefined : JSON.stringify(data) }); const value = await response.json(); if (!response.ok) { if (response.status === 401) showLogin(); throw new Error(value.error ?? '操作失败'); } return value; }
 function showLogin() { $('#login').classList.remove('hidden'); $('#shell').classList.add('hidden'); }
 function showApp() { $('#login').classList.add('hidden'); $('#shell').classList.remove('hidden'); }
-const pages = [['overview', '◷', '总览', '今天，一切都好。'], ['chats', '☷', '聊天与记忆', '那些慢慢积累的小事'], ['character', '◇', '角色与表达', '让它保持熟悉的样子'], ['interaction', '↗', '主动与语音', '找到舒服的相处节奏'], ['members', '♧', '成员与提醒', '每一位朋友，都被记住'], ['usage', '◴', '语音与额度', '看清每一份用量'], ['models', '◉', '模型与预算', '把用量和花费放在心里']];
-for (const [id, icon, label] of pages) { const b = button('', () => { location.hash = id; }, ''); b.append(node('span', icon), node('b', label)); b.dataset.page = id; $('#nav').append(b); }
-window.addEventListener('hashchange', () => { page = pages.some(p => p[0] === location.hash.slice(1)) ? location.hash.slice(1) : 'overview'; render(); });
-$('#login-form').onsubmit = async event => { event.preventDefault(); const b = event.submitter; b.disabled = true; try { await api('/login', 'POST', { password: $('#password').value }); $('#password').value = ''; page = pages.some(p => p[0] === location.hash.slice(1)) ? location.hash.slice(1) : 'overview'; await refresh(); showApp(); } catch (error) { toast(error.message); } finally { b.disabled = false; } };
+const pageGroups = [
+  ['日常管理', [['overview', '◷', '总览', '看看今天的陪伴与运行近况。'], ['chats', '☷', '聊天与记忆', '那些慢慢积累的小事，都在这里。'], ['members', '♧', '成员管理', '邀请朋友，管理每个人的偏好。'], ['reminders', '◴', '约定提醒', '查看已经记下的约定与赴约状态。']]],
+  ['陪伴设置', [['character', '◇', '角色与表达', '让它保持熟悉的样子。'], ['proactive', '↗', '主动聊天', '找到舒服的联系频率与时段。'], ['voice', '♫', '语音与音色', '调整声音、语气与语音回复习惯。']]],
+  ['运行与费用', [['usage', '▥', '用量统计', '查看本项目的模型 Token、语音字符与费用估算。'], ['accounts', '◎', '账户余额', '分别查询 DeepSeek 与阿里云的账户信息。'], ['models', '◉', '模型与预算', '管理连接、密钥、单价与预算保护。']]],
+];
+const pages = pageGroups.flatMap(([, entries]) => entries);
+const pageFromHash = () => { const hash = location.hash.slice(1), id = ({ interaction: 'proactive' })[hash] ?? hash; return pages.some(p => p[0] === id) ? id : 'overview'; };
+for (const [group, entries] of pageGroups) {
+  const section = node('section', undefined, 'nav-group'); section.append(node('div', group, 'nav-label'));
+  for (const [id, icon, label] of entries) { const b = button('', () => { location.hash = id; }, ''); b.append(node('span', icon), node('b', label)); b.dataset.page = id; section.append(b); }
+  $('#nav').append(section);
+}
+window.addEventListener('hashchange', () => { page = pageFromHash(); render().catch(e => toast(e.message)); });
+$('#login-form').onsubmit = async event => { event.preventDefault(); const b = event.submitter; b.disabled = true; try { await api('/login', 'POST', { password: $('#password').value }); $('#password').value = ''; page = pageFromHash(); await refresh(); showApp(); } catch (error) { toast(error.message); } finally { b.disabled = false; } };
 $('#logout').onclick = async () => { await api('/logout', 'POST', {}); showLogin(); };
 $('#refresh').onclick = () => refresh().catch(e => toast(e.message));
 async function refresh() { state = await api('/state'); if (!state.users.some(u => u.id === selectedUser)) selectedUser = state.users[0]?.id; const online = ['ready', 'resumed'].includes(state.runtime.gateway); $('#connection').textContent = online ? 'QQ 已连接' : 'QQ 未连接'; $('#connection-dot').classList.toggle('online', online); await render(); }
@@ -53,11 +63,11 @@ function overview(container) {
   const kpis = node('div', undefined, 'kpis');
   for (const [label, value, note] of [['正在相伴', `${state.users.filter(u => u.enabled).length} 位`, '受邀成员'], ['本月调用估算', `¥ ${state.usage.spent.toFixed(3)}`, `可变额度 ¥ ${state.usage.limit.toFixed(2)}`], ['等待中的提醒', state.reminders.filter(r => r.status === 'pending').length, '与主动闲聊分别管理'], ['聊天保留', `${state.config.retentionDays} 天`, '长期记忆持续保留，可随时删除']]) { const k = node('div', undefined, 'card'); k.append(node('div', label, 'kpi-label'), node('div', String(value), 'kpi-value'), node('div', note, 'kpi-note')); kpis.append(k); } container.append(kpis);
   const grid = node('div', undefined, 'grid-two'), budget = card('留一点余量', '费用是按配置单价估算的，最终以供应商账单为准。');
-  const progress = node('div', undefined, 'progress'), bar = node('div'); bar.style.width = `${Math.min(100, state.usage.percent)}%`; progress.append(bar); budget.append(progress, node('p', `总预算 ¥${state.config.totalBudget} · 固定开支预留 ¥${state.config.fixedReserve} · 费用余量 ¥${state.config.safetyReserve}`, 'muted small'), node('p', `其中语音 ¥${(state.usage.voice?.amount ?? 0).toFixed(4)} · ${state.usage.voice?.calls ?? 0} 次调用`, 'muted small'), button('查看语音与额度 ↗', () => { location.hash = 'usage'; }), button('管理预算', () => { location.hash = 'models'; }));
+  const progress = node('div', undefined, 'progress'), bar = node('div'); bar.style.width = `${Math.min(100, state.usage.percent)}%`; progress.append(bar); budget.append(progress, node('p', `总预算 ¥${state.config.totalBudget} · 固定开支预留 ¥${state.config.fixedReserve} · 费用余量 ¥${state.config.safetyReserve}`, 'muted small'), node('p', `其中语音 ${money(state.usage.voice?.amount)} · ${count(state.usage.voice?.calls)} 次调用`, 'muted small'), button('查看用量统计 ↗', () => { location.hash = 'usage'; }), button('查看账户余额', () => { location.hash = 'accounts'; }));
   const activity = card('运行近况', '仅记录连接和运行状态，不在这里展示聊天正文。'); if (!state.runtime.events.length) activity.append(node('p', '还没有运行事件。', 'empty')); for (const event of state.runtime.events.slice(0, 5)) { const row = node('div', undefined, 'event'); row.append(node('time', time(event.at)), node('span', event.message)); activity.append(row); } grid.append(budget, activity); container.append(grid);
 }
 async function chats(container) {
-  if (!state.users.length) { container.append(node('p', '还没有成员。在「成员与提醒」创建邀请码，让朋友从 QQ 加入。', 'empty')); return; }
+  if (!state.users.length) { container.append(node('p', '还没有成员。在「成员管理」创建邀请码，让朋友从 QQ 加入。', 'empty')); return; }
   const toolbar = node('div', undefined, 'conversation-toolbar'), select = node('select'); select.setAttribute('aria-label', '选择用户');
   for (const user of state.users) { const option = node('option', user.name); option.value = user.id; select.append(option); } select.value = selectedUser; select.onchange = () => { selectedUser = select.value; older = 0; render(); };
   toolbar.append(select, button('个人偏好', () => preferenceDialog(selectedUser)), node('span', '仅管理员可查看所有成员的保留正文', 'muted small')); container.append(toolbar);
@@ -99,62 +109,176 @@ function members(container) {
   }
   if (!state.users.length) memberCard.append(node('p', '还没有成员，可以先创建邀请码。', 'empty'));
   container.append(memberCard);
+}
+function reminders(container) {
+  const list = node('div'); let requestVersion = 0;
+  const cancel = async reminder => {
+    const version = ++requestVersion;
+    const result = await api(`/users/${reminder.user_id}/reminders/${reminder.id}`, 'DELETE', {});
+    if (result.cancelled) {
+      state.reminders = state.reminders.map(row => row.id === reminder.id ? { ...row, status: 'cancelled' } : row);
+      if (list.isConnected) renderReminderList(list, cancel);
+    }
+    try {
+      const updated = await api('/state');
+      if (version !== requestVersion || !list.isConnected) return;
+      state.reminders = updated.reminders; renderReminderList(list, cancel);
+    } catch (error) { throw new Error(`${result.cancelled ? '提醒已取消，但列表刷新未完成' : '列表刷新未完成'}：${error.message}`); }
+  };
+  container.append(list, settingsForm('迟到补发', '超过补发窗口的约定标为已错过，不再自动发送。约定不计入主动聊天次数。', ['reminderGraceMinutes']));
+  renderReminderList(list, cancel);
+}
+function renderReminderList(container, cancel) {
   const reminderCard = card('一次性提醒', '超过补发窗口标记为已错过；发送结果不确定时保留核对状态，不重复发送。'), wrap = node('div', undefined, 'table-wrap'), table = node('table'), head = node('tr'); for (const title of ['成员', '时间', '内容', '状态', '']) head.append(node('th', title)); table.append(head);
   const names = { pending: '等待', sent: '已发送', missed: '已错过', cancelled: '已取消', uncertain: '待核对', sending: '发送中' };
-  for (const reminder of state.reminders) { const row = node('tr'); for (const text of [state.users.find(u => u.id === reminder.user_id)?.name ?? '', time(reminder.due), reminder.text, `${names[reminder.status] ?? reminder.status}${reminder.note ? ` · ${reminder.note}` : ''}`]) row.append(node('td', text)); const action = node('td'); if (reminder.status === 'pending') action.append(button('取消', async () => { await api(`/users/${reminder.user_id}/reminders/${reminder.id}`, 'DELETE', {}); await refresh(); }, 'text-button')); row.append(action); table.append(row); } wrap.append(table); reminderCard.append(wrap); if (!state.reminders.length) reminderCard.append(node('p', '在 QQ 中说 /提醒 5分钟后 喝水，开始第一条提醒。', 'empty')); container.append(reminderCard);
+  for (const reminder of state.reminders) { const row = node('tr'); for (const text of [state.users.find(u => u.id === reminder.user_id)?.name ?? '', time(reminder.due), reminder.text, `${names[reminder.status] ?? reminder.status}${reminder.note ? ` · ${reminder.note}` : ''}`]) row.append(node('td', text)); const action = node('td'); if (reminder.status === 'pending') action.append(button('取消', () => cancel(reminder), 'text-button')); row.append(action); table.append(row); } wrap.append(table); reminderCard.append(wrap); if (!state.reminders.length) reminderCard.append(node('p', '在 QQ 中说「五分钟后叫我喝水」，开始第一条约定。', 'empty')); container.replaceChildren(reminderCard);
 }
-const money = value => `¥ ${Number(value ?? 0).toFixed(4)}`;
-const count = value => Number(value ?? 0).toLocaleString('zh-CN');
+const money = value => value != null && Number.isFinite(Number(value)) ? `¥ ${Number(value).toFixed(4)}` : '未知';
+const count = value => value != null && Number.isFinite(Number(value)) ? Number(value).toLocaleString('zh-CN') : '未知';
 const usageKind = kind => ({ conversation: '对话', proactive: '主动聊天', voice: '语音合成', 'voice-design': '音色设计' })[kind] ?? kind;
 const usageStatus = status => ({ reserved: '处理中 · 已预留', settled: '已结算到项目账本', estimated: '估算 · 待核对', rejected: '明确拒绝 · 未计费' })[status] ?? status;
-function renderUsageData(container) {
-  const usage = state.usage, voice = usage.voice ?? {}, metrics = node('div', undefined, 'kpis usage-metrics');
-  container.replaceChildren();
-  for (const [label, value, note] of [
+function metricCards(entries) {
+  const metrics = node('div', undefined, 'kpis usage-metrics');
+  for (const [label, value, note] of entries) { const metric = node('div', undefined, 'card'); metric.append(node('div', label, 'kpi-label'), node('div', value, 'kpi-value'), node('div', note, 'kpi-note')); metrics.append(metric); }
+  return metrics;
+}
+function usageTable(titles, rows) {
+  const wrap = node('div', undefined, 'table-wrap'), table = node('table'), head = node('tr');
+  for (const title of titles) head.append(node('th', title)); table.append(head);
+  for (const cells of rows) { const row = node('tr'); for (const value of cells) row.append(value instanceof Node ? value : node('td', String(value))); table.append(row); }
+  wrap.append(table); return wrap;
+}
+const tokenValue = (summary, field) => summary.calls === 0 ? '0' : count(summary[field]);
+const tokenNote = (summary, field) => {
+  if (summary.calls === 0) return '本期暂无调用';
+  if (summary[field] == null) return '尚未回报，不能视为 0';
+  const unknown = summary.tokenCoverage?.[field]?.unknownCalls;
+  return unknown > 0 ? `已知合计 · ${count(unknown)} 次未回报` : '供应商回报的已知合计';
+};
+const purposeName = row => ({ conversation: '普通对话', proactive: '主动聊天', recovery: '回复恢复', agreement: '约定接话', memory: '记忆确认' })[row.purpose] ?? usageKind(row.kind);
+function tokenCell(summary, field) {
+  const cell = node('td', tokenValue(summary, field), 'usage-detail');
+  if (summary.tokenCoverage?.[field]?.unknownCalls > 0 && summary[field] != null) cell.append(node('div', '部分未知', 'muted small'));
+  return cell;
+}
+function renderModelUsage(container) {
+  const model = state.usage.model;
+  if (!model) { container.append(node('p', '尚未取得模型用量记录，请刷新后重试。', 'notice')); return; }
+  container.append(metricCards([
+    ['本月模型费用估算', money(model.amount), `${count(model.calls)} 次调用 · 预留 ${money(model.reservedAmount)}`],
+    ['总 Token', tokenValue(model, 'totalTokens'), tokenNote(model, 'totalTokens')],
+    ['输入 Token', tokenValue(model, 'promptTokens'), tokenNote(model, 'promptTokens')],
+    ['输出 Token', tokenValue(model, 'completionTokens'), tokenNote(model, 'completionTokens')],
+  ]));
+  const details = card('计量明细', '缓存命中与未命中属于输入明细；推理 Token 属于输出明细，均不再次加进总 Token。历史缺失不会通过费用反推。');
+  const detailGrid = node('div', undefined, 'token-details');
+  for (const [label, field] of [['缓存命中', 'cacheHitTokens'], ['缓存未命中', 'cacheMissTokens'], ['推理 Token', 'reasoningTokens']]) { const item = node('div'); item.append(node('div', label, 'kpi-label'), node('strong', tokenValue(model, field), 'token-value'), node('p', tokenNote(model, field), 'muted small')); detailGrid.append(item); }
+  details.append(detailGrid, node('p', `${count(model.reportedTokenCalls)} 次完整回报输入、输出与总量；${count(model.unknownTokenCalls)} 次计量缺失或不完整。处理中 ${count(model.pendingCalls)} 次，明确拒绝 ${count(model.rejectedCalls)} 次，结果不明 ${count(model.uncertainCalls)} 次。`, 'muted small'));
+  container.append(details);
+  const grid = node('div', undefined, 'grid-two usage-tables'), daily = card('近 14 天', '按北京时间统计，可跨月份；未完整回报的用量单独标记。'), models = card('本月按模型', '金额为项目账本估算，不含供应商赠金、折扣或账户其他调用。');
+  daily.append(usageTable(['日期', '调用', '总 Token', '费用估算'], (model.daily ?? []).map(row => [row.day, count(row.calls), tokenCell(row, 'totalTokens'), money(row.amount)])));
+  models.append(usageTable(['模型', '调用', '总 Token', '费用估算'], (model.byModel ?? []).map(row => [row.model || '历史模型未知', count(row.calls), tokenCell(row, 'totalTokens'), money(row.amount)])));
+  if (!model.byModel?.length) models.append(node('p', '本月还没有模型调用。', 'empty'));
+  grid.append(daily, models); container.append(grid);
+  const recent = card('最近 20 次模型调用', '可跨月份查看。缺失字段显示未知；恢复回复、约定接话与记忆确认分别记录，不把一次聊天当作一次调用。');
+  const rows = (model.recent ?? []).map(row => {
+    const service = node('td', purposeName(row)); service.append(node('div', row.model || '历史模型未知', 'muted small'));
+    const cache = node('td', `${count(row.cacheHitTokens)} / ${count(row.cacheMissTokens)}`, 'usage-detail');
+    const status = node('td', usageStatus(row.status));
+    const outcome = ({ failed: '回复处理失败', uncertain: '调用结果不明', unknown: '历史结果未知' })[row.outcome]; if (outcome) status.append(node('div', outcome, 'muted small'));
+    const output = node('td', count(row.completionTokens), 'usage-detail'); if (row.reasoningTokens != null) output.append(node('div', `其中推理 ${count(row.reasoningTokens)}`, 'muted small'));
+    return [time(row.at), service, count(row.promptTokens), output, count(row.totalTokens), cache, money(row.amount), status];
+  });
+  recent.append(usageTable(['时间', '用途 / 模型', '输入', '输出', '总 Token', '缓存命中 / 未命中', '费用估算', '状态'], rows));
+  if (!rows.length) recent.append(node('p', '还没有模型调用记录。', 'empty'));
+  container.append(recent);
+}
+function renderVoiceUsage(container) {
+  const voice = state.usage.voice ?? {};
+  container.append(metricCards([
     ['本月语音费用估算', money(voice.amount), `含预留 ${money(voice.reservedAmount)}、估算 ${money(voice.estimatedAmount)}`],
     ['本月语音服务调用', `${count(voice.calls)} 次`, `含试听和音色设计 · ${count(voice.rejectedCalls)} 次明确拒绝`],
-    ['已回报计费字符', count(voice.reportedCharacters), '来自供应商响应；不是语音秒数'],
+    ['已回报计费字符', count(voice.reportedCharacters), '来自供应商响应；不是模型 Token 或语音秒数'],
     ['未回报字符的估算', count(voice.estimatedCharacters), `${count(voice.unknownCharacterCalls)} 次无字符记录，未计入字符合计`],
-  ]) { const metric = node('div', undefined, 'card'); metric.append(node('div', label, 'kpi-label'), node('div', value, 'kpi-value'), node('div', note, 'kpi-note')); metrics.append(metric); }
-  container.append(metrics);
-  const summary = card(`${usage.month} · 本项目用量`, '按北京时间月份统计。费用按项目配置单价记账，包含试听；免费额度、资源包抵扣后的实际扣款以阿里云账单为准。');
-  summary.append(node('p', `全部调用 ${money(usage.spent)} / 项目可变预算 ${money(usage.limit)}，项目预算剩余 ${money(Math.max(0, usage.limit - usage.spent))}。此处不是百炼账户余额。`, 'muted small'));
-  const wrap = node('div', undefined, 'table-wrap'), table = node('table'), head = node('tr');
-  for (const title of ['类型', '调用次数', '费用估算', '其中预留', '其中待核对估算']) head.append(node('th', title)); table.append(head);
-  for (const row of usage.breakdown ?? []) { const tr = node('tr'); for (const text of [usageKind(row.kind), count(row.calls), money(row.amount), money(row.reservedAmount), money(row.estimatedAmount)]) tr.append(node('td', text)); table.append(tr); }
-  wrap.append(table); summary.append(wrap); container.append(summary);
+  ]));
   const recent = card('最近 20 次语音服务调用', '包含跨月份记录。仅记录用量，不在这里保存台词或音频；历史未采集的字符数显示为未知。');
-  const recentWrap = node('div', undefined, 'table-wrap'), recentTable = node('table'), recentHead = node('tr');
-  for (const title of ['时间', '服务', '费用估算', '计费字符', '状态']) recentHead.append(node('th', title)); recentTable.append(recentHead);
-  for (const row of voice.recent ?? []) {
-    const tr = node('tr'), service = node('td', `${({ bailian: '百炼', http: '通用接口', system: '本机' })[row.provider] ?? '历史记录'} · ${usageKind(row.kind)}`);
+  const rows = (voice.recent ?? []).map(row => {
+    const service = node('td', `${({ bailian: '百炼', http: '通用接口', system: '本机' })[row.provider] ?? '历史记录'} · ${usageKind(row.kind)}`);
     if (row.model) service.append(node('div', row.model, 'muted small'));
     const characters = row.status === 'rejected' ? '未计费' : row.characterBasis === 'not_applicable' ? '不适用（本机）' : row.reportedCharacters != null ? `${count(row.reportedCharacters)} · 已回报` : row.estimatedCharacters != null ? `${count(row.estimatedCharacters)} · 预估` : '未知';
     const status = node('td', usageStatus(row.status));
     if (row.outcome === 'audio_failed') status.append(node('div', '生成已完成，音频获取或校验失败', 'muted small'));
     if (row.outcome === 'failed') status.append(node('div', '生成失败', 'muted small'));
-    tr.append(node('td', time(row.at), 'usage-detail'), service, node('td', money(row.amount), 'usage-detail'), node('td', characters, 'usage-detail'), status); recentTable.append(tr);
-  }
-  recentWrap.append(recentTable); recent.append(recentWrap);
-  if (!voice.recent?.length) recent.append(node('p', '还没有语音调用记录。', 'empty'));
-  container.append(recent, node('p', '本项目用量每 30 秒刷新一次；页面隐藏时暂停刷新。', 'muted small'));
+    return [time(row.at), service, money(row.amount), characters, status];
+  });
+  recent.append(usageTable(['时间', '服务', '费用估算', '计费字符', '状态'], rows));
+  if (!rows.length) recent.append(node('p', '还没有语音调用记录。', 'empty'));
+  container.append(recent);
 }
-async function usagePage(container) {
-  const account = card('阿里云账户与百炼额度', '这里查询云账户实际信息，与下方本项目预算分开。余额查询不影响聊天功能。');
-  const result = node('div', '正在查询账户状态…', 'account-state'), actions = node('div', undefined, 'usage-actions');
-  let refreshButton;
-  const reload = async force => {
-    refreshButton.disabled = true;
-    try { const snapshot = await api(force ? '/billing/refresh' : '/billing', force ? 'POST' : 'GET', force ? {} : undefined); if (account.isConnected) renderBilling(result, snapshot); }
-    catch (error) { if (account.isConnected) result.replaceChildren(node('p', `账户查询暂时不可用：${error.message}`, 'notice')); }
-    finally { refreshButton.disabled = false; }
-  };
-  refreshButton = button('刷新账户额度', () => reload(true)); actions.append(refreshButton);
-  account.append(result, actions, billingCredentials(reload));
-  container.append(account);
+function renderUsageData(container) {
+  const usage = state.usage;
+  container.replaceChildren();
+  const summary = card(`${usage.month} · 本项目账本`, '按北京时间月份统计。以下费用按配置单价估算；真实账户余额在「账户余额」中分别查询。');
+  const totals = node('div', undefined, 'budget-summary');
+  for (const [label, value] of [['全部调用估算', usage.spent], ['可变预算', usage.limit], ['预算剩余', Math.max(0, usage.limit - usage.spent)]]) { const item = node('div'); item.append(node('span', label, 'kpi-label'), node('strong', money(value))); totals.append(item); }
+  summary.append(totals);
+  const breakdown = node('details', undefined, 'usage-breakdown'); breakdown.append(node('summary', '查看费用分类'));
+  breakdown.append(usageTable(['类型', '调用次数', '费用估算', '其中预留', '待核对估算'], (usage.breakdown ?? []).map(row => [usageKind(row.kind), count(row.calls), money(row.amount), money(row.reservedAmount), money(row.estimatedAmount)])));
+  summary.append(breakdown); container.append(summary);
+  const tabs = node('div', undefined, 'usage-tabs'); tabs.setAttribute('aria-label', '用量类型');
+  for (const [id, label] of [['model', '模型 Token'], ['voice', '语音字符']]) { const tab = button(label, () => { usageView = id; renderUsageData(container); }, usageView === id ? 'primary' : 'secondary'); tab.setAttribute('aria-pressed', String(usageView === id)); tabs.append(tab); }
+  tabs.append(node('span', '每 30 秒更新 · 页面隐藏时暂停', 'muted small')); container.append(tabs);
+  if (usageView === 'model') renderModelUsage(container); else renderVoiceUsage(container);
+}
+function usagePage(container) {
   const data = node('div'); data.id = 'usage-data'; container.append(data); renderUsageData(data);
-  await reload(false);
 }
+function renderDeepseekBalance(container, snapshot) {
+  container.replaceChildren();
+  if (snapshot.status === 'ready' || snapshot.stale) {
+    const balances = node('div', undefined, 'account-balances');
+    for (const row of snapshot.balances ?? []) {
+      const item = node('div', undefined, 'account-balance');
+      item.append(node('div', '总可用余额', 'kpi-label'), node('div', `${row.currency ?? '币种未知'} ${row.total ?? '未知'}`, 'kpi-value'), node('p', `赠送余额 ${row.granted ?? '未知'} · 充值余额 ${row.toppedUp ?? '未知'}`, 'muted small'));
+      balances.append(item);
+    }
+    if (!snapshot.balances?.length) balances.append(node('p', '没有取得余额明细，不能视为 0。', 'notice'));
+    container.append(balances);
+    if (typeof snapshot.isAvailable === 'boolean') container.append(node('p', snapshot.isAvailable ? '供应商返回：账户余额可用' : '供应商返回：账户余额不可用', snapshot.isAvailable ? 'muted small' : 'notice'));
+  }
+  if (snapshot.status !== 'ready') container.append(node('p', snapshot.message || '尚未取得 DeepSeek 余额。', 'notice'));
+  if (snapshot.stale) container.append(node('p', '查询失败，以上为上次成功结果，请勿视为实时余额。', 'notice'));
+  if (snapshot.updatedAt) container.append(node('p', `数据时间：${time(snapshot.updatedAt)}`, 'muted small'));
+}
+async function accountsPage(container) {
+  container.append(node('p', '账户信息包含供应商账户的其他使用；项目 Token 与费用估算请到「用量统计」查看。查询失败不会影响聊天。', 'page-intro'));
+  const deepseek = card('DeepSeek 账户余额', '使用「模型与预算」中已保存的 DeepSeek API Key，只查询官方账户余额。'), deepseekResult = node('div', '正在查询 DeepSeek 账户…', 'account-state'), deepseekActions = node('div', undefined, 'usage-actions');
+  let deepseekRefresh, deepseekVersion = 0;
+  const reloadDeepseek = async force => {
+    const version = ++deepseekVersion;
+    deepseekRefresh.disabled = true;
+    try { const snapshot = await api(force ? '/deepseek-balance/refresh' : '/deepseek-balance', force ? 'POST' : 'GET', force ? {} : undefined); if (version === deepseekVersion && deepseek.isConnected) renderDeepseekBalance(deepseekResult, snapshot); }
+    catch (error) { if (version === deepseekVersion && deepseek.isConnected) deepseekResult.replaceChildren(node('p', `DeepSeek 余额暂时不可用：${error.message}`, 'notice')); }
+    finally { if (version === deepseekVersion) deepseekRefresh.disabled = false; }
+  };
+  deepseekRefresh = button('刷新 DeepSeek 余额', () => reloadDeepseek(true));
+  deepseekActions.append(deepseekRefresh, button('管理模型密钥', () => { location.hash = 'models'; }, 'text-button'));
+  deepseek.append(deepseekResult, deepseekActions); container.append(deepseek);
+  const account = card('阿里云账户与百炼额度', '现金余额、资源包与模型免费额度分别展示，使用独立的只读查询凭据。');
+  const result = node('div', '正在查询阿里云账户…', 'account-state'), actions = node('div', undefined, 'usage-actions');
+  let refreshButton, billingVersion = 0;
+  const reload = async force => {
+    const version = ++billingVersion;
+    refreshButton.disabled = true;
+    try { const snapshot = await api(force ? '/billing/refresh' : '/billing', force ? 'POST' : 'GET', force ? {} : undefined); if (version === billingVersion && account.isConnected) renderBilling(result, snapshot); }
+    catch (error) { if (version === billingVersion && account.isConnected) result.replaceChildren(node('p', `阿里云账户查询暂时不可用：${error.message}`, 'notice')); }
+    finally { if (version === billingVersion) refreshButton.disabled = false; }
+  };
+  refreshButton = button('刷新阿里云额度', () => reload(true)); actions.append(refreshButton);
+  account.append(result, actions, billingCredentials(reload)); container.append(account);
+  await Promise.all([reloadDeepseek(false), reload(false)]);
+}
+
 function externalLink(text, url) { const link = node('a', text); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; return link; }
 function renderBilling(container, snapshot) {
   container.replaceChildren();
@@ -234,20 +358,27 @@ function voiceStudio() {
   actions.append(preview, create); form.onsubmit = event => event.preventDefault(); form.append(grid, actions); section.append(form, result, node('p', '设计描述决定声音特征；语气指导调整每次表达。生成后需点击「使用这个音色」才会替换，支持填入该模型对应的自定义音色 ID。', 'muted small')); return section;
 }
 async function render() {
-  if (!state) return; $('#page-title').textContent = pages.find(p => p[0] === page)?.[3] ?? ''; for (const b of $('#nav').children) b.classList.toggle('active', b.dataset.page === page);
+  if (!state) return;
+  const current = pages.find(p => p[0] === page);
+  $('#page-title').textContent = current?.[2] ?? ''; $('#page-description').textContent = current?.[3] ?? '';
+  $('#page-group').textContent = pageGroups.find(([, entries]) => entries.some(p => p[0] === page))?.[0] ?? '';
+  for (const b of $('#nav').querySelectorAll('[data-page]')) { b.classList.toggle('active', b.dataset.page === page); if (b.dataset.page === page) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); }
   for (const url of audioUrls) URL.revokeObjectURL(url); audioUrls.clear();
   const container = node('div'); $('#content').replaceChildren(container);
   if (page === 'overview') overview(container);
   if (page === 'chats') await chats(container);
   if (page === 'character') container.append(settingsForm('人设与说话方式', '共享基础角色，各自积累相处习惯。自动记忆保留原话依据，可在聊天与记忆中更正或遗忘。', ['enabled', 'character', 'autoMemory', 'maxBubbles', 'replyGapMs', 'contextMessages', 'retentionDays']));
-  if (page === 'interaction') {
-    container.append(settingsForm('主动聊天', '次数是上限。没有合适内容可以不发，也不计未回复；关闭轻松开新话题后只回访有依据的旧话题。用户回来聊天会提前结束忙碌暂停。', ['proactiveEnabled', 'proactiveAllowCasual', 'proactiveDaily', 'startHour', 'endHour', 'intervalHours', 'proactiveRetryHours', 'busyHours', 'unansweredLimit', 'unansweredPauseHours', 'reminderGraceMinutes']), settingsForm('语音与表达', '语音合成失败时自动使用对应文字回复。修改语音方式后保存，可查看相应设置。', ['autoVoice', 'autoVoiceChance', 'voiceWithText', 'voiceProvider']));
+  if (page === 'proactive') container.append(settingsForm('主动聊天', '次数是上限。没有合适内容可以不发，也不计未回复；关闭轻松开新话题后只回访有依据的旧话题。用户回来聊天会提前结束忙碌暂停。', ['proactiveEnabled', 'proactiveAllowCasual', 'proactiveDaily', 'startHour', 'endHour', 'intervalHours', 'proactiveRetryHours', 'busyHours', 'unansweredLimit', 'unansweredPauseHours']));
+  if (page === 'voice') {
+    container.append(settingsForm('语音回复习惯', '语音合成失败时自动使用对应文字回复。修改语音方式后保存，可查看相应设置。', ['autoVoice', 'autoVoiceChance', 'voiceWithText', 'voiceProvider']));
     if (state.config.voiceProvider === 'bailian') container.append(settingsForm('百炼声音设置', '选择声音、调整日常语气。开启自动情绪后，会根据当前角色和聊天内容轻微调整表达。API Key 在「模型与预算」中管理。', ['bailianWorkspace', 'bailianVoice', 'voiceInstruction', 'voiceEmotionEnabled', 'voiceSpeed', 'voicePitch', 'voiceVolume']), voiceStudio());
     if (state.config.voiceProvider === 'system') container.append(settingsForm('本机声音设置', '只适用于 macOS。', ['voiceName', 'voiceRate']));
     if (state.config.voiceProvider === 'http') container.append(settingsForm('通用接口设置', '接口需接受兼容的合成请求并返回 WAV 音频。', ['voiceName', 'voiceModel', 'voiceEndpoint']));
   }
   if (page === 'members') members(container);
-  if (page === 'usage') await usagePage(container);
+  if (page === 'reminders') reminders(container);
+  if (page === 'usage') usagePage(container);
+  if (page === 'accounts') accountsPage(container).catch(error => toast(error.message));
   if (page === 'models') container.append(settingsForm('模型连接', '当前首期使用 DeepSeek Flash，支持文字与普通图片。修改模型后需要重新核对能力与价格。', ['model', 'modelBaseUrl']), credentials(), settingsForm('月度预算与保护', '估算采用配置单价，不等于供应商最终账单。百炼每个汉字按 2 个计费字符计算。达到降级线暂停主动聊天和自动语音，额度耗尽停止新付费请求。', ['totalBudget', 'fixedReserve', 'safetyReserve', 'warnPercent', 'reducePercent', 'inputPrice', 'outputPrice', 'voicePricePer10k', 'bailianPricePer10k']));
 }
 setInterval(async () => {
@@ -255,4 +386,4 @@ setInterval(async () => {
   if (page !== 'usage' || !container || document.hidden || $('#shell').classList.contains('hidden') || $('#dialog').open) return;
   try { const usage = await api('/usage'); if (container.isConnected && page === 'usage') { state.usage = usage; renderUsageData(container); } } catch (error) { toast(error.message); }
 }, 30000);
-try { const session = await api('/session'); if (session.authenticated) { page = pages.some(p => p[0] === location.hash.slice(1)) ? location.hash.slice(1) : 'overview'; await refresh(); showApp(); } else { showLogin(); if (!session.configured) { $('#login-note').textContent = '尚未设置管理员密码，请先运行本机配置向导。'; $('#login-note').classList.remove('hidden'); } } } catch (error) { showLogin(); toast(error.message); }
+try { const session = await api('/session'); if (session.authenticated) { page = pageFromHash(); await refresh(); showApp(); } else { showLogin(); if (!session.configured) { $('#login-note').textContent = '尚未设置管理员密码，请先运行本机配置向导。'; $('#login-note').classList.remove('hidden'); } } } catch (error) { showLogin(); toast(error.message); }

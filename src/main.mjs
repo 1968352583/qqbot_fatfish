@@ -11,6 +11,7 @@ import { Voice } from './voice.mjs';
 import { Bot } from './bot.mjs';
 import { createAdminServer } from './server.mjs';
 import { Billing } from './billing.mjs';
+import { DeepSeekBalance } from './deepseek-balance.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const dataDir = resolve(process.env.DATA_DIR ?? resolve(root, '.local/app'));
@@ -47,7 +48,7 @@ const bot = new Bot({ store, model, voice, transport: api, log });
 const controller = new AbortController();
 const pending = new Set();
 const track = promise => { pending.add(promise); promise.catch(() => log('runtime', '操作未完成。')).finally(() => pending.delete(promise)); };
-const server = createAdminServer({ store, secrets, bot, voice, billing: new Billing({ secrets }), runtime, publicDir: resolve(root, 'public'), publicOrigin: process.env.ADMIN_ORIGIN, trustProxy: process.env.ADMIN_TRUST_PROXY === '1' });
+const server = createAdminServer({ store, secrets, bot, voice, billing: new Billing({ secrets }), deepseekBalance: new DeepSeekBalance({ secrets, store }), runtime, publicDir: resolve(root, 'public'), publicOrigin: process.env.ADMIN_ORIGIN, trustProxy: process.env.ADMIN_TRUST_PROXY === '1' });
 const port = Number(process.env.PORT ?? 3210), host = process.env.HOST ?? '127.0.0.1';
 await new Promise((done, reject) => { server.once('error', reject); server.listen(port, host, done); });
 console.log(`大肥鱼管理员入口：http://${host}:${port}`);

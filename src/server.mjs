@@ -12,7 +12,7 @@ function clientAddress(req, trustProxy) {
   return trustProxy === true && loopback && typeof forwarded === 'string' && isIP(forwarded) ? forwarded : peer;
 }
 
-export function createAdminServer({ store, secrets, bot, voice, billing, runtime, publicDir, publicOrigin, trustProxy = false }) {
+export function createAdminServer({ store, secrets, bot, voice, billing, deepseekBalance, runtime, publicDir, publicOrigin, trustProxy = false }) {
   const sessions = new Map(), attempts = new Map();
   let voiceBusy = false;
   const safeUsers = () => store.users().map(({ openid, ...user }) => user);
@@ -60,6 +60,10 @@ export function createAdminServer({ store, secrets, bot, voice, billing, runtime
         if ((url.pathname === '/api/billing' && req.method === 'GET') || (url.pathname === '/api/billing/refresh' && req.method === 'POST')) {
           if (!billing) throw fail('账户查询尚未接入。', 503);
           json(200, await billing.snapshot({ refresh: req.method === 'POST' })); return;
+        }
+        if ((url.pathname === '/api/deepseek-balance' && req.method === 'GET') || (url.pathname === '/api/deepseek-balance/refresh' && req.method === 'POST')) {
+          if (!deepseekBalance) throw fail('DeepSeek 余额查询尚未接入。', 503);
+          json(200, await deepseekBalance.snapshot({ refresh: req.method === 'POST' })); return;
         }
         if (url.pathname === '/api/config' && req.method === 'PUT') { const config = store.updateConfig(body); bot.stop(); store.prune(); json(200, config); return; }
         if (url.pathname === '/api/secrets' && req.method === 'PUT') { const status = secrets.update(body); if (body.adminPassword) sessions.clear(); json(200, status); return; }
