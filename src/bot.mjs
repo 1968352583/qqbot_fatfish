@@ -5,7 +5,7 @@ import { applyMemoryUpdates } from './memory.mjs';
 export { reminderInput } from './reminders.mjs';
 
 export function proactiveAllowed(user, config, usage, now, { ignoreCheck = false } = {}) {
-  if (!config.enabled || !config.proactiveEnabled || !user.enabled || config.proactiveDaily === 0) return false;
+  if (!config.enabled || !config.proactiveEnabled || !user?.enabled || config.proactiveDaily === 0) return false;
   if (['reduced', 'stopped'].includes(usage.level) || user.busy_until > now || user.pause_until > now) return false;
   const hour = chinaHour(now);
   if (hour < config.startHour || hour >= config.endHour) return false;
@@ -22,11 +22,19 @@ export function wantsQuiet(text) {
 export class Bot {
   constructor({ store, model, voice, transport, log = () => {}, sleep = delay, random = Math.random }) {
     Object.assign(this, { store, model, voice, transport, log, sleep, random });
-    this.jobs = new Map(); this.cooldowns = new Map(); this.ticking = false; this.lastPrune = 0;
+    this.jobs = new Map(); this.reminderJobs = new Map(); this.cooldowns = new Map(); this.ticking = false; this.lastPrune = 0;
     this.reminderCommands = new ReminderCommands(store);
   }
   cancel(userId) { this.jobs.get(userId)?.abort(); }
-  stop() { for (const job of this.jobs.values()) job.abort(); }
+  deleteUser(userId) {
+    const result = this.store.deleteUser(userId);
+    if (!result) return null;
+    this.cancel(userId); this.jobs.delete(userId); this.cooldowns.delete(userId);
+    for (const [id, job] of this.reminderJobs) if (job.userId === userId) { job.controller.abort(); this.reminderJobs.delete(id); }
+    this.reminderCommands.pending.delete(userId);
+    return result;
+  }
+  stop() { for (const job of this.jobs.values()) job.abort(); for (const job of this.reminderJobs.values()) job.controller.abort(); }
   async accept(packet) {
     if (packet.op !== 0 || packet.t !== 'C2C_MESSAGE_CREATE') return;
     const data = packet.d, openid = data?.author?.user_openid;
@@ -59,6 +67,7 @@ export class Bot {
     const input = { id: data.id, at, messageId, revision, content, raw, kind, images, signal: controller.signal };
     try {
       await this.sleep(250, undefined, { signal: controller.signal });
+      if (!this.current(user.id, input)) return;
       let command;
       try { command = this.command(user.id, raw, messageId); }
       catch (error) { command = error.message; }
@@ -93,7 +102,7 @@ export class Bot {
       }
     } finally { if (this.jobs.get(user.id) === controller) this.jobs.delete(user.id); }
   }
-  current(userId, input) { return !input.signal?.aborted && this.store.user(userId)?.revision === input.revision; }
+  current(userId, input) { const user = this.store.user(userId); return Boolean(user) && !input.signal?.aborted && user.revision === input.revision; }
   async agreementReply(userId, agreement, input) {
     let response;
     try {
@@ -118,7 +127,10 @@ export class Bot {
       if (!proactive && this.store.now() - input.at > 4 * 60000) break;
       const user = this.store.user(userId);
       const reply = proactive ? undefined : { id: input.id, seq: this.store.replySequence(input.id) };
-      await this.transport.text(user.openid, text, reply);
+      await this.transport.text(user.openid, text, reply, { signal: input.signal });
+      // An already submitted QQ request cannot be recalled. If deletion occurs
+      // while it is in flight, never recreate its member or retained content.
+      if (!this.store.user(userId)) return sent;
       this.store.message(userId, 'assistant', text, { kind: kind ?? (control ? 'command' : 'text'), sources, memories });
       if (sent++ === 0) onFirst?.();
       if (sent < bubbles.length) await this.sleep(this.store.config().replyGapMs, undefined, { signal: input.signal });
@@ -126,6 +138,7 @@ export class Bot {
     return sent;
   }
   async respond(userId, response, input, proactive = false) {
+    if (!this.current(userId, input)) return;
     if (proactive && response.skipped) return;
     const prefs = this.store.preferences(userId), text = response.bubbles.join(' ');
     const explicit = !proactive && /用语音|语音回|说给我听/.test(input.raw);
@@ -138,7 +151,8 @@ export class Bot {
         if (!this.current(userId, input) || !this.store.preferences(userId).enabled) return;
         if (!proactive && this.store.now() - input.at > 4 * 60000) return;
         const reply = proactive ? undefined : { id: input.id, seq: this.store.replySequence(input.id) };
-        await this.transport.audio(this.store.user(userId).openid, audio, reply);
+        await this.transport.audio(this.store.user(userId).openid, audio, reply, { signal: input.signal });
+        if (!this.store.user(userId)) return;
         this.store.message(userId, 'assistant', text, { kind: 'voice', sources: response.sources, memories: response.memoryIds });
         onFirst();
         if (!prefs.voiceWithText) return;
@@ -188,17 +202,22 @@ export class Bot {
         if (age > config.reminderGraceMinutes * 60000) { this.store.markReminder(reminder.id, 'missed', '超过补发窗口'); continue; }
         if (!config.enabled || !this.store.user(reminder.user_id)?.enabled) continue;
         this.store.markReminder(reminder.id, 'sending');
+        const controller = new AbortController();
+        this.reminderJobs.set(reminder.id, { userId: reminder.user_id, controller });
         try {
           const text = reminderDelivery(reminder, age > 60000);
-          await this.transport.text(this.store.user(reminder.user_id).openid, text);
+          await this.transport.text(this.store.user(reminder.user_id).openid, text, undefined, { signal: controller.signal });
+          if (!this.store.user(reminder.user_id)) continue;
           this.store.message(reminder.user_id, 'assistant', text, { kind: 'reminder', sources: JSON.parse(reminder.delivery_sources), memories: JSON.parse(reminder.delivery_memories) });
           this.store.markReminder(reminder.id, 'sent', age > 60000 ? '延迟补发' : '');
         } catch (error) {
+          if (!this.store.user(reminder.user_id)) continue;
           this.store.markReminder(reminder.id, error.status ? 'pending' : 'uncertain', error.status ? `平台暂未接受（${error.code ?? error.status}）` : '网络结果不确定，请核对 QQ；不自动重试', now + 60000);
           this.log('reminder', '提醒发送未完成，已记录状态。');
-        }
+        } finally { this.reminderJobs.delete(reminder.id); }
       }
       for (const user of this.store.users()) {
+        if (!this.store.user(user.id)) continue;
         if (this.jobs.has(user.id) || (this.cooldowns.get(user.id) ?? 0) > now || !proactiveAllowed(user, this.store.preferences(user.id), this.store.usage(), now)) continue;
         this.cooldowns.set(user.id, now + this.store.config().proactiveRetryHours * 3600000);
         // Persist before the provider call, including interrupted attempts.
@@ -208,7 +227,7 @@ export class Bot {
         try {
           const input = { revision: user.revision, signal: controller.signal };
           const response = await this.model.respond(user.id, { proactive: true, signal: controller.signal });
-          if (!response.skipped && proactiveAllowed(this.store.user(user.id), this.store.preferences(user.id), this.store.usage(), this.store.now(), { ignoreCheck: true })) await this.respond(user.id, response, input, true);
+          if (this.current(user.id, input) && !response.skipped && proactiveAllowed(this.store.user(user.id), this.store.preferences(user.id), this.store.usage(), this.store.now(), { ignoreCheck: true })) await this.respond(user.id, response, input, true);
         } catch (error) { if (!controller.signal.aborted) this.log('proactive', error.message); }
         finally { if (this.jobs.get(user.id) === controller) this.jobs.delete(user.id); }
       }

@@ -78,15 +78,15 @@ export class BailianVoice {
     let data;
     try { data = JSON.parse((await readBounded(response, limit)).toString('utf8')); }
     catch { throw new Error('百炼返回了无效响应。'); }
-    if (data.code || !data.output) throw Object.assign(new Error('百炼未完成请求，请检查音色、模型权限和账户额度。'), { rejected: true });
+    if (data.code || !data.output) throw Object.assign(new Error('百炼未完成请求，请检查音色、模型权限和账户额度。'), { rejected: Boolean(data.code) });
     return data;
   }
   async synthesize(text, { signal, optional = false, instruction = '', manual = false } = {}) {
     if (typeof text !== 'string' || !text.trim() || text.length > 100) throw new Error('语音文本需为 1～100 字。');
     const connection = this.connection(), { config } = connection;
     if (!config.bailianVoice.trim()) throw new Error('请先选择或创建百炼音色。');
-    const cost = characters(text) / 10000 * config.bailianPricePer10k;
-    const callId = this.store.reserve('voice', cost, optional);
+    const estimatedCharacters = characters(text), cost = estimatedCharacters / 10000 * config.bailianPricePer10k;
+    const callId = this.store.reserve('voice', cost, optional, { provider: 'bailian', model: BAILIAN_MODEL, estimatedCharacters, pricePer10k: config.bailianPricePer10k, outcome: 'pending' });
     const timeout = AbortSignal.timeout(60000), combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
     let settled = false;
     try {
@@ -97,14 +97,15 @@ export class BailianVoice {
         instruction: [config.voiceInstruction, current && `本句表达：${current}`].filter(Boolean).join('\n'),
         language_hints: ['zh'],
       } }, combined);
-      const billed = data.usage?.characters;
-      this.store.settle(callId, Number.isFinite(billed) && billed >= 0 ? billed / 10000 * config.bailianPricePer10k : cost, Number.isFinite(billed) && billed >= 0 ? 'settled' : 'estimated'); settled = true;
+      const billed = data.usage?.characters, reported = Number.isSafeInteger(billed) && billed >= 0;
+      this.store.settle(callId, reported ? billed / 10000 * config.bailianPricePer10k : cost, reported ? 'settled' : 'estimated', { reportedCharacters: reported ? billed : null, outcome: 'succeeded' }); settled = true;
       const url = bailianAudioUrl(data.output.audio?.url);
       const audio = await this.fetch(url, { redirect: 'error', signal: combined });
       if (!audio.ok) { await audio.body?.cancel().catch(() => {}); throw new Error('百炼已生成语音，但音频下载失败。'); }
       return wav(await readBounded(audio, MAX_AUDIO));
     } catch (error) {
-      if (!settled) this.store.settle(callId, error.rejected ? 0 : undefined, error.rejected ? 'rejected' : 'estimated');
+      if (!settled) this.store.settle(callId, error.rejected ? 0 : undefined, error.rejected ? 'rejected' : 'estimated', { outcome: error.rejected ? 'rejected' : 'uncertain' });
+      else this.store.recordUsage(callId, { outcome: 'audio_failed' });
       if (signal?.aborted) throw signal.reason;
       // Only our fixed messages are exposed; network errors may contain signed URLs.
       throw new Error(/^百炼|^服务器|^请先/.test(error.message) ? error.message : '百炼语音暂时不可用，请稍后重试。');
@@ -114,19 +115,20 @@ export class BailianVoice {
     if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 500) throw new Error('请用 1～500 字描述希望的声音。');
     if (typeof text !== 'string' || text.trim().length < 15 || text.length > 100) throw new Error('音色试听文本需为 15～100 字。');
     const connection = this.connection();
-    const callId = this.store.reserve('voice-design', 0);
+    const callId = this.store.reserve('voice-design', 0, false, { provider: 'bailian', model: 'voice-enrollment', pricePer10k: 0, outcome: 'pending' });
     let settled = false;
     try {
       const timeout = AbortSignal.timeout(60000);
       const data = await this.request(connection, 'customization', { model: 'voice-enrollment', input: { action: 'create_voice', target_model: BAILIAN_MODEL, voice_prompt: prompt.trim(), preview_text: text, prefix: 'fatfish', language_hints: ['zh'] }, parameters: { sample_rate: 24000, response_format: 'wav' } }, signal ? AbortSignal.any([signal, timeout]) : timeout, 2 * MAX_AUDIO);
-      this.store.settle(callId, 0); settled = true;
+      this.store.settle(callId, 0, 'settled', { reportedCharacters: data.usage?.characters ?? null, outcome: 'succeeded' }); settled = true;
       const result = data.output;
       if (typeof result.voice_id !== 'string' || result.voice_id.length > 300 || !result.voice_id.startsWith(`${BAILIAN_MODEL}-vd-`) || (result.target_model && result.target_model !== BAILIAN_MODEL)) throw new Error('百炼音色创建结果与模型不匹配。');
       const encoded = result.preview_audio?.data;
       if (typeof encoded !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new Error('百炼音色预览无效。');
       return { voiceId: result.voice_id, model: BAILIAN_MODEL, ...wav(Buffer.from(encoded, 'base64')) };
     } catch (error) {
-      if (!settled) this.store.settle(callId, error.rejected ? 0 : undefined);
+      if (!settled) this.store.settle(callId, error.rejected ? 0 : undefined, error.rejected ? 'rejected' : 'estimated', { outcome: error.rejected ? 'rejected' : 'uncertain' });
+      else this.store.recordUsage(callId, { outcome: 'audio_failed' });
       throw new Error(/^百炼|^服务器|^请先/.test(error.message) ? error.message : '百炼音色设计暂时不可用。');
     }
   }

@@ -10,6 +10,7 @@ import { CompanionModel } from './model.mjs';
 import { Voice } from './voice.mjs';
 import { Bot } from './bot.mjs';
 import { createAdminServer } from './server.mjs';
+import { Billing } from './billing.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const dataDir = resolve(process.env.DATA_DIR ?? resolve(root, '.local/app'));
@@ -35,7 +36,8 @@ try { runtime.release = (await readFile(resolve(root, 'RELEASE'), 'utf8')).trim(
 catch (error) { if (error.code !== 'ENOENT') throw error; runtime.release = 'local'; }
 const log = (kind, message) => { runtime.events.unshift({ at: new Date().toISOString(), kind, message: String(message).slice(0, 200) }); runtime.events.splice(50); console.log(`[${kind}] ${String(message).slice(0, 200)}`); };
 const api = new QqApi({ appId: process.env.QQ_APP_ID, appSecret: process.env.QQ_APP_SECRET });
-if (!store.users().length) {
+// An empty list after administrator deletion must not restore the test account.
+if (store.claimLegacyMemberImport()) {
   try { const previous = JSON.parse(await readFile(resolve(root, '.local/qq-session.json'), 'utf8')); if (previous.appId === api.appId && typeof previous.openid === 'string') store.addUser(previous.openid, '管理员'); }
   catch (error) { if (error.code !== 'ENOENT') log('setup', '未自动导入此前测试账号，可使用邀请码加入。'); }
 }
@@ -45,7 +47,7 @@ const bot = new Bot({ store, model, voice, transport: api, log });
 const controller = new AbortController();
 const pending = new Set();
 const track = promise => { pending.add(promise); promise.catch(() => log('runtime', '操作未完成。')).finally(() => pending.delete(promise)); };
-const server = createAdminServer({ store, secrets, bot, voice, runtime, publicDir: resolve(root, 'public'), publicOrigin: process.env.ADMIN_ORIGIN, trustProxy: process.env.ADMIN_TRUST_PROXY === '1' });
+const server = createAdminServer({ store, secrets, bot, voice, billing: new Billing({ secrets }), runtime, publicDir: resolve(root, 'public'), publicOrigin: process.env.ADMIN_ORIGIN, trustProxy: process.env.ADMIN_TRUST_PROXY === '1' });
 const port = Number(process.env.PORT ?? 3210), host = process.env.HOST ?? '127.0.0.1';
 await new Promise((done, reject) => { server.once('error', reject); server.listen(port, host, done); });
 console.log(`大肥鱼管理员入口：http://${host}:${port}`);

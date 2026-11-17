@@ -12,7 +12,7 @@ function clientAddress(req, trustProxy) {
   return trustProxy === true && loopback && typeof forwarded === 'string' && isIP(forwarded) ? forwarded : peer;
 }
 
-export function createAdminServer({ store, secrets, bot, voice, runtime, publicDir, publicOrigin, trustProxy = false }) {
+export function createAdminServer({ store, secrets, bot, voice, billing, runtime, publicDir, publicOrigin, trustProxy = false }) {
   const sessions = new Map(), attempts = new Map();
   let voiceBusy = false;
   const safeUsers = () => store.users().map(({ openid, ...user }) => user);
@@ -56,6 +56,11 @@ export function createAdminServer({ store, secrets, bot, voice, runtime, publicD
         if (!authenticated) throw fail('请先登录。', 401);
         if (url.pathname === '/api/logout' && req.method === 'POST') { sessions.delete(cookies); json(200, { ok: true }, { 'Set-Cookie': cookie('') }); return; }
         if (url.pathname === '/api/state' && req.method === 'GET') { json(200, { config: store.config(), users: safeUsers(), usage: store.usage(), secrets: secrets.status(), reminders: store.reminders(), runtime }); return; }
+        if (url.pathname === '/api/usage' && req.method === 'GET') { json(200, store.usage()); return; }
+        if ((url.pathname === '/api/billing' && req.method === 'GET') || (url.pathname === '/api/billing/refresh' && req.method === 'POST')) {
+          if (!billing) throw fail('账户查询尚未接入。', 503);
+          json(200, await billing.snapshot({ refresh: req.method === 'POST' })); return;
+        }
         if (url.pathname === '/api/config' && req.method === 'PUT') { const config = store.updateConfig(body); bot.stop(); store.prune(); json(200, config); return; }
         if (url.pathname === '/api/secrets' && req.method === 'PUT') { const status = secrets.update(body); if (body.adminPassword) sessions.clear(); json(200, status); return; }
         if (['/api/voice/preview', '/api/voice/design'].includes(url.pathname) && req.method === 'POST') {
@@ -73,6 +78,7 @@ export function createAdminServer({ store, secrets, bot, voice, runtime, publicD
         if (match) {
           const [, id, resource, itemId] = match;
           if (!store.user(id)) throw fail('成员不存在。', 404);
+          if (!resource && req.method === 'DELETE') { json(200, bot.deleteUser(id)); return; }
           if (!resource && req.method === 'PUT') { bot.cancel(id); const { openid, ...user } = store.updateUser(id, body); json(200, user); return; }
           if (resource === 'messages' && req.method === 'GET') { const offset = Math.max(0, Math.min(1000000, Number(url.searchParams.get('offset')) || 0)); json(200, store.messages(id, { limit: 100, offset })); return; }
           if (resource === 'memories' && req.method === 'GET') { json(200, store.memories(id)); return; }

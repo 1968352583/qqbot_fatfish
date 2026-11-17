@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { defaults, validateConfig, chinaDate, monthKey } from './config.mjs';
+import { usageDetails, writeUsageDetails } from './usage.mjs';
 
 const json = value => JSON.stringify(value);
 const parse = value => JSON.parse(value);
@@ -23,6 +24,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS reminders (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), text TEXT NOT NULL, due INTEGER NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending', note TEXT NOT NULL DEFAULT '', next_try INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS usage (id TEXT PRIMARY KEY, month TEXT NOT NULL, kind TEXT NOT NULL, amount REAL NOT NULL, status TEXT NOT NULL, at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS usage_details (usage_id TEXT PRIMARY KEY REFERENCES usage(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', estimated_characters INTEGER, billed_characters INTEGER,
+        price_per_10k REAL, outcome TEXT NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS replies (remote_id TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS receipts (remote_id TEXT PRIMARY KEY, at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS invites (hash TEXT PRIMARY KEY, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0);
@@ -34,6 +38,7 @@ export class Store {
       if (!reminderColumns.has(name)) this.db.exec(`ALTER TABLE reminders ADD COLUMN ${name} TEXT NOT NULL DEFAULT ${initial}`);
     }
     this.db.prepare("UPDATE reminders SET status='uncertain', note='发送时进程中断，请核对 QQ；不会自动重复发送' WHERE status='sending'").run();
+    this.db.prepare("UPDATE usage_details SET outcome='uncertain',updated_at=? WHERE usage_id IN (SELECT id FROM usage WHERE status='reserved')").run(this.now());
     this.db.prepare("UPDATE usage SET status='estimated' WHERE status='reserved'").run();
   }
   close() { this.db.close(); }
@@ -53,6 +58,29 @@ export class Store {
     this.db.prepare('UPDATE users SET name=?, enabled=?, prefs=?, revision=revision+1 WHERE id=?').run(
       typeof name === 'string' ? name.slice(0, 50) : user.name, enabled === undefined ? Number(user.enabled) : Number(Boolean(enabled)), json(prefs ?? user.prefs), id);
     return this.user(id);
+  }
+  deleteUser(id) {
+    const result = this.transaction(() => {
+      if (!this.user(id)) return null;
+      this.db.prepare('DELETE FROM replies WHERE remote_id IN (SELECT remote_id FROM messages WHERE user_id=?)').run(id);
+      const messages = this.db.prepare('DELETE FROM messages WHERE user_id=?').run(id).changes;
+      const memories = this.db.prepare('DELETE FROM memories WHERE user_id=?').run(id).changes;
+      const reminders = this.db.prepare('DELETE FROM reminders WHERE user_id=?').run(id).changes;
+      this.db.prepare('DELETE FROM users WHERE id=?').run(id);
+      this.db.prepare("INSERT INTO settings(key,value) VALUES ('legacy_member_import_done','true') ON CONFLICT(key) DO NOTHING").run();
+      // memory_kinds cascades with memories. Anonymous usage, consumed invites
+      // and content-free replay receipts keep their existing accounting/TTL.
+      return { deleted: true, id, messages, memories, reminders };
+    });
+    if (result) this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    return result;
+  }
+  claimLegacyMemberImport() {
+    return this.transaction(() => {
+      const pending = !this.db.prepare("SELECT 1 FROM settings WHERE key='legacy_member_import_done'").get() && this.users().length === 0;
+      this.db.prepare("INSERT INTO settings(key,value) VALUES ('legacy_member_import_done','true') ON CONFLICT(key) DO NOTHING").run();
+      return pending;
+    });
   }
   preferences(id) { const config = this.config(); const user = this.user(id); return { ...config, ...user.prefs, enabled: config.enabled && user.enabled, proactiveEnabled: config.proactiveEnabled && (user.prefs.proactiveEnabled ?? config.proactiveEnabled) }; }
   invite() { const code = randomBytes(8).toString('hex'); this.db.prepare('INSERT INTO invites VALUES (?,?,0)').run(digest(code), this.now() + 86400000); return code; }
@@ -119,12 +147,13 @@ export class Store {
     const config = this.config(); const spent = this.db.prepare('SELECT COALESCE(SUM(amount),0) total FROM usage WHERE month=?').get(monthKey(this.now())).total;
     const limit = Math.max(0, config.totalBudget - config.fixedReserve - config.safetyReserve);
     const percent = limit ? spent / limit * 100 : 100;
-    return { month: monthKey(this.now()), spent, limit, percent, level: percent >= 100 ? 'stopped' : percent >= config.reducePercent ? 'reduced' : percent >= config.warnPercent ? 'warning' : 'normal' };
+    return { month: monthKey(this.now()), spent, limit, percent, level: percent >= 100 ? 'stopped' : percent >= config.reducePercent ? 'reduced' : percent >= config.warnPercent ? 'warning' : 'normal', ...usageDetails(this.db, monthKey(this.now())) };
   }
-  reserve(kind, amount, optional = false) {
-    return this.transaction(() => { const usage = this.usage(); if ((optional && ['reduced', 'stopped'].includes(usage.level)) || usage.spent + amount > usage.limit || usage.level === 'stopped') throw new Error('预算额度不足，已暂停新的付费请求。'); const id = randomUUID(); this.db.prepare('INSERT INTO usage VALUES (?,?,?,?,?,?)').run(id, monthKey(this.now()), kind, amount, 'reserved', this.now()); return id; });
+  reserve(kind, amount, optional = false, details) {
+    return this.transaction(() => { const usage = this.usage(); const localFreeVoice = kind === 'voice' && amount === 0 && details?.provider === 'system'; if (!localFreeVoice && ((optional && ['reduced', 'stopped'].includes(usage.level)) || usage.spent + amount > usage.limit || usage.level === 'stopped')) throw new Error('预算额度不足，已暂停新的付费请求。'); const id = randomUUID(); this.db.prepare('INSERT INTO usage(id,month,kind,amount,status,at) VALUES (?,?,?,?,?,?)').run(id, monthKey(this.now()), kind, amount, 'reserved', this.now()); this.recordUsage(id, details); return id; });
   }
-  settle(id, amount, status = 'settled') { if (Number.isFinite(amount) && amount >= 0) this.db.prepare('UPDATE usage SET amount=?, status=? WHERE id=?').run(amount, status, id); else this.db.prepare("UPDATE usage SET status='estimated' WHERE id=?").run(id); }
+  settle(id, amount, status = 'settled', details) { if (Number.isFinite(amount) && amount >= 0) this.db.prepare('UPDATE usage SET amount=?, status=? WHERE id=?').run(amount, status, id); else this.db.prepare("UPDATE usage SET status='estimated' WHERE id=?").run(id); this.recordUsage(id, details); }
+  recordUsage(id, details) { writeUsageDetails(this.db, id, details, this.now()); }
   reminder(userId, text, due, { sources = [] } = {}) {
     if (!Number.isFinite(due) || due <= this.now() || due > this.now() + 366 * 86400000) throw new Error('这个时间已经过去了，或者离现在太远了。换一个未来一年内的时间好吗？');
     const existing = this.db.prepare("SELECT id, source_ids FROM reminders WHERE user_id=? AND text=? AND due=? AND status='pending'").get(userId, text.slice(0, 500), due);

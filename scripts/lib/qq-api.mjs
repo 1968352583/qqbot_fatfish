@@ -21,7 +21,8 @@ export class QqApi {
     this.expiresAt = 0;
   }
 
-  async request(path, { body, token } = {}) {
+  async request(path, { body, token, signal } = {}) {
+    signal?.throwIfAborted();
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers.Authorization = `QQBot ${token}`;
     let response;
@@ -31,11 +32,13 @@ export class QqApi {
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
         redirect: 'error',
-        signal: AbortSignal.timeout(15_000),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000),
       });
     } catch {
+      signal?.throwIfAborted();
       throw new Error('QQ 请求未完成，请检查网络、代理和平台 IP 白名单。');
     }
+    signal?.throwIfAborted();
     let data;
     try { data = await response.json(); }
     catch { throw new QqApiError(response.status, 'invalid_json'); }
@@ -48,10 +51,12 @@ export class QqApi {
     return data;
   }
 
-  async accessToken() {
+  async accessToken({ signal } = {}) {
+    signal?.throwIfAborted();
     if (this.token && Date.now() < this.expiresAt - 60_000) return this.token;
     const data = await this.request('/app/getAppAccessToken', {
       body: { appId: this.appId, clientSecret: this.appSecret },
+      signal,
     });
     if (typeof data.access_token !== 'string' || !data.access_token || !(Number(data.expires_in) > 0)) {
       throw new Error('QQ 凭证响应缺少有效的 token 或有效期。');
@@ -61,8 +66,10 @@ export class QqApi {
     return this.token;
   }
 
-  async call(path, body) {
-    return this.request(path, { body, token: await this.accessToken() });
+  async call(path, body, { signal } = {}) {
+    const token = await this.accessToken({ signal });
+    signal?.throwIfAborted();
+    return this.request(path, { body, token, signal });
   }
 
   async gateway() {
@@ -74,13 +81,14 @@ export class QqApi {
     return url.href;
   }
 
-  async text(openid, content, reply) {
+  async text(openid, content, reply, { signal } = {}) {
     const body = { msg_type: 0, content };
     if (reply) Object.assign(body, { msg_id: reply.id, msg_seq: reply.seq });
-    return this.call(`/v2/users/${encodeURIComponent(openid)}/messages`, body);
+    return this.call(`/v2/users/${encodeURIComponent(openid)}/messages`, body, { signal });
   }
 
-  async audio(openid, { bytes, filename }, reply) {
+  async audio(openid, { bytes, filename }, reply, { signal } = {}) {
+    signal?.throwIfAborted();
     // Keep the entire Base64 request comfortably below the documented 5M limit.
     if (!bytes.length || bytes.length > 1024 * 1024) throw new Error('联调音频须为 1 MB 以内的非空文件。');
     const upload = await this.call(`/v2/users/${encodeURIComponent(openid)}/files`, {
@@ -88,14 +96,15 @@ export class QqApi {
       file_name: filename,
       file_data: bytes.toString('base64'),
       srv_send_msg: false,
-    });
+    }, { signal });
+    signal?.throwIfAborted();
     if (typeof upload.file_info !== 'string' || !upload.file_info) throw new Error('QQ 上传响应缺少 file_info。');
     const body = {
       msg_type: 7,
       media: { file_info: upload.file_info },
     };
     if (reply) Object.assign(body, { msg_id: reply.id, msg_seq: reply.seq });
-    return this.call(`/v2/users/${encodeURIComponent(openid)}/messages`, body);
+    return this.call(`/v2/users/${encodeURIComponent(openid)}/messages`, body, { signal });
   }
 }
 

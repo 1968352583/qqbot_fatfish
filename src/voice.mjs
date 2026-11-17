@@ -14,7 +14,9 @@ export class Voice {
     if (config.voiceProvider === 'system') {
       if (process.platform !== 'darwin') throw new Error('当前系统需要配置云端语音。');
       const dir = await mkdtemp(join(tmpdir(), 'fatfish-voice-'));
+      let callId;
       try {
+        callId = this.store.reserve('voice', 0, optional, { provider: 'system', model: 'macos-say', pricePer10k: 0, outcome: 'pending' });
         const path = join(dir, 'voice.wav');
         await new Promise((done, reject) => {
           const child = spawn('/usr/bin/say', ['-v', config.voiceName, '-r', String(config.voiceRate), '-o', path, '--file-format=WAVE', '--data-format=LEI16@24000', '--', text], { stdio: 'ignore', signal, timeout: 30000 });
@@ -23,20 +25,33 @@ export class Voice {
         });
         const bytes = await readFile(path);
         if (bytes.length < 1000 || bytes.length > 1024 * 1024) throw new Error('语音长度不合适。');
+        this.store.settle(callId, 0, 'settled', { outcome: 'succeeded' });
         return { bytes, filename: 'voice.wav' };
+      } catch (error) {
+        if (callId) this.store.settle(callId, 0, 'settled', { outcome: 'failed' }); throw error;
       } finally { await rm(dir, { recursive: true, force: true }); }
     }
     if (!config.voiceEndpoint || !config.voiceModel || !this.secrets.values().ttsKey) throw new Error('云端语音尚未配置。');
-    const cost = [...text].reduce((n, c) => n + (/\p{Script=Han}/u.test(c) ? 2 : 1), 0) / 10000 * config.voicePricePer10k;
-    const callId = this.store.reserve('voice', cost, optional);
+    const estimatedCharacters = [...text].reduce((n, c) => n + (/\p{Script=Han}/u.test(c) ? 2 : 1), 0);
+    const cost = estimatedCharacters / 10000 * config.voicePricePer10k;
+    const callId = this.store.reserve('voice', cost, optional, { provider: 'http', model: config.voiceModel, estimatedCharacters, pricePer10k: config.voicePricePer10k, outcome: 'pending' });
+    let settled = false, generated = false;
     try {
       const response = await this.fetch(config.voiceEndpoint, { method: 'POST', redirect: 'error', headers: { Authorization: `Bearer ${this.secrets.values().ttsKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: config.voiceModel, input: text, voice: config.voiceName, response_format: 'wav', sample_rate: 24000 }), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000) });
-      if (!response.ok) { this.store.settle(callId, 0, 'rejected'); throw new Error('云端语音请求失败。'); }
+      if (!response.ok) {
+        const rejected = response.status >= 400 && response.status < 500 && response.status !== 408;
+        this.store.settle(callId, rejected ? 0 : undefined, rejected ? 'rejected' : 'estimated', { outcome: rejected ? 'rejected' : 'uncertain' }); settled = true;
+        await response.body?.cancel().catch(() => {}); throw new Error('云端语音请求失败。');
+      }
+      this.store.settle(callId, cost, 'estimated', { outcome: 'succeeded' }); settled = true; generated = true;
       const chunks = []; let size = 0;
       for await (const chunk of response.body) { size += chunk.length; if (size > 1024 * 1024) { await response.body.cancel().catch(() => {}); throw new Error('语音文件过大。'); } chunks.push(chunk); }
-      this.store.settle(callId, cost, 'estimated');
       const bytes = Buffer.concat(chunks); if (bytes.length < 1000) throw new Error('语音响应无效。');
       return { bytes, filename: 'voice.wav' };
-    } catch { this.store.settle(callId, undefined); throw new Error('云端语音暂时不可用。'); }
+    } catch {
+      if (!settled) this.store.settle(callId, undefined, 'estimated', { outcome: 'uncertain' });
+      else if (generated) this.store.recordUsage(callId, { outcome: 'audio_failed' });
+      throw new Error('云端语音暂时不可用。');
+    }
   }
 }
